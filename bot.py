@@ -31,13 +31,13 @@ from telegram.ext import (
 from config import (
     AUTHORIZED_USERS,
     BRANDS_CONFIG_PATH,
-    GOOGLE_SHEETS_CREDS_FILE,
+    
     TELEGRAM_BOT_TOKEN,
 )
 from fetcher import MultiSourceFetcher
 from analyzer import BrandAnalyzer
 from charts import generate_sentiment_pie, generate_subreddit_pie, generate_sentiment_trend
-from sheets import SheetsWriter
+from sheets import SheetsWriter, export_results_csv
 
 # ---- Logging -------------------------------------------------------------
 logging.basicConfig(
@@ -212,7 +212,7 @@ async def _run_research_pipeline(update: Update, brand_name: str, brand_config: 
         # -- Step 4: Google Sheet -------------------------------------------
         sheet_url = None
         try:
-            writer = SheetsWriter(GOOGLE_SHEETS_CREDS_FILE)
+            writer = SheetsWriter()
             sheet_url = await asyncio.to_thread(writer.create_research_sheet, brand_name, results)
         except Exception as e:
             logger.error(f"Google Sheets error: {e}")
