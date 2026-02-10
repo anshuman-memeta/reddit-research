@@ -2,43 +2,169 @@
   "brands": {
     "Groww": {
       "category": "finance",
-      "keywords": ["Groww", "Groww app"],
-      "product_terms": ["stock", "trading", "mutual fund", "demat", "portfolio", "invest", "SIP", "brokerage"],
-      "competitors": ["Zerodha", "Angel One", "Upstox"],
-      "subreddit_hints": ["IndiaInvestments", "DesiStreetBets", "IndianStockMarket"],
+      "keywords": [
+        "Groww",
+        "Groww app"
+      ],
+      "product_terms": [
+        "stock",
+        "trading",
+        "mutual fund",
+        "demat",
+        "portfolio",
+        "invest",
+        "SIP",
+        "brokerage"
+      ],
+      "competitors": [
+        "Zerodha",
+        "Angel One",
+        "Upstox"
+      ],
+      "subreddit_hints": [
+        "IndiaInvestments",
+        "DesiStreetBets",
+        "IndianStockMarket"
+      ],
       "description": "Investment platform for stocks, mutual funds, and more"
     },
     "Scapia": {
       "category": "finance",
-      "keywords": ["Scapia", "Scapia card", "Scapia cards"],
-      "product_terms": ["credit card", "rewards", "cashback", "travel", "lounge", "forex"],
-      "competitors": ["OneCard", "Fi", "Jupiter", "Niyo"],
-      "subreddit_hints": ["IndiaInvestments", "CreditCardsIndia", "IndianStockMarket"],
+      "keywords": [
+        "Scapia",
+        "Scapia card",
+        "Scapia cards"
+      ],
+      "product_terms": [
+        "credit card",
+        "rewards",
+        "cashback",
+        "travel",
+        "lounge",
+        "forex"
+      ],
+      "competitors": [
+        "OneCard",
+        "Fi",
+        "Jupiter",
+        "Niyo"
+      ],
+      "subreddit_hints": [
+        "IndiaInvestments",
+        "CreditCardsIndia",
+        "IndianStockMarket"
+      ],
       "description": "Travel-focused credit card with rewards and cashback"
     },
     "Dot & Key": {
       "category": "beauty",
-      "keywords": ["Dot & Key", "Dot and Key", "Dot n Key", "dot nd key"],
-      "product_terms": ["sunscreen", "moisturizer", "serum", "cleanser", "skincare", "SPF", "vitamin C"],
-      "competitors": ["Minimalist", "Plum", "Mamaearth", "Cetaphil"],
-      "subreddit_hints": ["IndianSkincareAddicts", "IndianMakeupAddicts"],
+      "keywords": [
+        "Dot & Key",
+        "Dot and Key",
+        "Dot n Key",
+        "dot nd key"
+      ],
+      "product_terms": [
+        "sunscreen",
+        "moisturizer",
+        "serum",
+        "cleanser",
+        "skincare",
+        "SPF",
+        "vitamin C"
+      ],
+      "competitors": [
+        "Minimalist",
+        "Plum",
+        "Mamaearth",
+        "Cetaphil"
+      ],
+      "subreddit_hints": [
+        "IndianSkincareAddicts",
+        "IndianMakeupAddicts"
+      ],
       "description": "Indian skincare brand with sunscreens, serums, and moisturizers"
     },
     "Licious": {
       "category": "food",
-      "keywords": ["Licious"],
-      "product_terms": ["meat", "chicken", "fish", "mutton", "seafood", "delivery", "fresh"],
-      "competitors": ["FreshToHome", "Zappfresh", "TenderCuts"],
-      "subreddit_hints": ["india", "bangalore", "mumbai", "delhi", "IndianFood"],
+      "keywords": [
+        "Licious"
+      ],
+      "product_terms": [
+        "meat",
+        "chicken",
+        "fish",
+        "mutton",
+        "seafood",
+        "delivery",
+        "fresh"
+      ],
+      "competitors": [
+        "FreshToHome",
+        "Zappfresh",
+        "TenderCuts"
+      ],
+      "subreddit_hints": [
+        "india",
+        "bangalore",
+        "mumbai",
+        "delhi",
+        "IndianFood"
+      ],
       "description": "Online meat and seafood delivery platform in India"
     },
     "Deconstruct": {
       "category": "beauty",
-      "keywords": ["Deconstruct"],
-      "product_terms": ["sunscreen", "skincare", "serum", "moisturizer", "SPF", "cleanser", "retinol", "vitamin C", "niacinamide"],
-      "competitors": ["Minimalist", "Dot & Key", "Plum", "Cetaphil"],
-      "subreddit_hints": ["IndianSkincareAddicts", "SkincareAddiction", "IndianBeautyTalks"],
+      "keywords": [
+        "Deconstruct"
+      ],
+      "product_terms": [
+        "sunscreen",
+        "skincare",
+        "serum",
+        "moisturizer",
+        "SPF",
+        "cleanser",
+        "retinol",
+        "vitamin C",
+        "niacinamide"
+      ],
+      "competitors": [
+        "Minimalist",
+        "Dot & Key",
+        "Plum",
+        "Cetaphil"
+      ],
+      "subreddit_hints": [
+        "IndianSkincareAddicts",
+        "SkincareAddiction",
+        "IndianBeautyTalks"
+      ],
       "description": "Science-backed Indian skincare brand known for sunscreens and serums"
+    },
+    "Nua": {
+      "category": "beauty",
+      "keywords": [
+        "Nua",
+        "Nua women",
+        "Nua pads"
+      ],
+      "product_terms": [
+        "skip"
+      ],
+      "competitors": [
+        "Stay free",
+        "stayfree",
+        "whisper"
+      ],
+      "subreddit_hints": [
+        "AskIndianWomen",
+        "TwoXIndia",
+        "Indianbeautytalks",
+        "SkincareaddictsIndia",
+        "IndianSkincareAddicts"
+      ],
+      "description": "Nua is an Indian women\u2019s wellness brand that provides100% toxic-free, rash-free sanitary pads, along with personal hygiene and skincare products. It focuses on sustainable, customizable, and safe menstrual care while providing educational resources and a period tracker app. Nua products are designed to reduce skin irritation, offering safe, high-quality, and comfortable alternatives for better menstrual health."
     }
   }
 }
