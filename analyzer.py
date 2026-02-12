@@ -225,7 +225,7 @@ class BrandAnalyzer:
             # Groq free tier: ~30 req/min. Wait 2.5s to stay under.
             time.sleep(2.5)
 
-            if progress_callback and (i + 1) % 10 == 0:
+            if progress_callback and (i + 1) % 25 == 0:
                 progress_callback(i + 1, total, len(results))
 
         logger.info(f"Analysis complete: {len(results)} relevant out of {total} posts")
