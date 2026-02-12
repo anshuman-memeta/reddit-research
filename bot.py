@@ -463,7 +463,7 @@ def main():
     app.add_error_handler(error_handler)
 
     logger.info("Research bot starting...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 
 if __name__ == "__main__":
