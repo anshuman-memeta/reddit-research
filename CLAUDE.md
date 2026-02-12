@@ -3,6 +3,7 @@
 ## Deployment
 
 - The bot runs on a **Vultr VPS** (Mumbai region): `ssh root@139.84.173.63`
+- Managed by **systemd** service: `research-bot.service` (`Restart=always`)
 - **Do NOT run `bot.py` in this container** — it will conflict with the VPS instance and cause Telegram 409 Conflict errors
 - Only one bot instance can poll Telegram at a time
 
@@ -11,7 +12,10 @@
 1. Push code changes to the repo
 2. SSH into the VPS: `ssh root@139.84.173.63`
 3. Pull changes: `cd ~/reddit-research && git pull`
-4. Restart the bot: `pkill -f bot.py && sleep 2 && nohup ./run-bot.sh > bot.log 2>&1 &`
+4. Restart the bot: `systemctl restart research-bot.service`
+5. Check logs: `journalctl -u research-bot.service -f`
+
+**Important:** Do NOT use `pkill + nohup` — the systemd service has `Restart=always` and will respawn the process, causing duplicate instances and Telegram 409 Conflict errors.
 
 ## Configuration
 
