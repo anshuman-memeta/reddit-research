@@ -15,8 +15,21 @@ from typing import Optional
 import matplotlib
 matplotlib.use("Agg")  # headless backend
 import matplotlib.pyplot as plt
+import matplotlib.font_manager as fm
 
 from config import CHART_OUTPUT_DIR, SENTIMENT_COLORS
+
+# --------------------------------------------------------------------------
+# Global style tweaks
+# --------------------------------------------------------------------------
+plt.rcParams.update({
+    "figure.facecolor": "#FFFFFF",
+    "axes.facecolor": "#FFFFFF",
+    "font.family": "sans-serif",
+    "font.sans-serif": ["DejaVu Sans", "Arial", "Helvetica"],
+})
+
+DONUT_WIDTH = 0.45  # ring thickness for donut charts
 
 
 def _ensure_output_dir(output_dir: str) -> str:
@@ -24,12 +37,16 @@ def _ensure_output_dir(output_dir: str) -> str:
     return output_dir
 
 
+# --------------------------------------------------------------------------
+# 1. Sentiment Donut Chart
+# --------------------------------------------------------------------------
+
 def generate_sentiment_pie(
     results: list[dict],
     brand_name: str,
     output_dir: str = CHART_OUTPUT_DIR,
 ) -> str:
-    """Pie chart: Positive / Negative / Neutral split."""
+    """Donut chart: Positive / Negative / Neutral split with center total."""
     _ensure_output_dir(output_dir)
 
     sentiments = Counter(r["sentiment"] for r in results)
@@ -39,30 +56,75 @@ def generate_sentiment_pie(
     for sentiment in ("positive", "negative", "neutral"):
         count = sentiments.get(sentiment, 0)
         if count > 0:
-            pct = count / total * 100
-            labels.append(f"{sentiment.capitalize()}\n({count}, {pct:.1f}%)")
+            labels.append(sentiment.capitalize())
             sizes.append(count)
             colors.append(SENTIMENT_COLORS[sentiment])
 
     fig, ax = plt.subplots(figsize=(8, 6))
+
     wedges, texts, autotexts = ax.pie(
-        sizes, labels=labels, colors=colors, autopct="%1.1f%%",
-        startangle=90, textprops={"fontsize": 11},
+        sizes,
+        colors=colors,
+        autopct=lambda pct: f"{pct:.1f}%",
+        startangle=90,
+        pctdistance=0.78,
+        wedgeprops={"width": DONUT_WIDTH, "edgecolor": "white", "linewidth": 2},
+        textprops={"fontsize": 12, "fontweight": "bold", "color": "#333333"},
     )
+
     for at in autotexts:
-        at.set_fontsize(12)
+        at.set_fontsize(11)
         at.set_fontweight("bold")
+        at.set_color("white")
+
+    # Center text: total count
+    ax.text(
+        0, 0, f"{total}\nposts",
+        ha="center", va="center",
+        fontsize=22, fontweight="bold", color="#333333",
+    )
+
+    # Legend below chart with counts
+    legend_labels = [
+        f"{lbl}  ({sz})" for lbl, sz in zip(labels, sizes)
+    ]
+    legend = ax.legend(
+        wedges, legend_labels,
+        loc="lower center",
+        bbox_to_anchor=(0.5, -0.08),
+        ncol=len(labels),
+        fontsize=11,
+        frameon=False,
+        handlelength=1.2,
+        handleheight=1.2,
+    )
 
     ax.set_title(
-        f"Sentiment Analysis: {brand_name}\n({total} relevant posts, last 3 months)",
-        fontsize=14, fontweight="bold", pad=20,
+        f"Sentiment Analysis — {brand_name}",
+        fontsize=16, fontweight="bold", color="#222222", pad=20,
+    )
+    fig.text(
+        0.5, 0.88, "Last 3 months",
+        ha="center", fontsize=11, color="#888888",
     )
 
     path = os.path.join(output_dir, f"{_safe_name(brand_name)}_sentiment.png")
     plt.tight_layout()
-    plt.savefig(path, dpi=150, bbox_inches="tight")
+    plt.savefig(path, dpi=180, bbox_inches="tight", facecolor="white")
     plt.close()
     return path
+
+
+# --------------------------------------------------------------------------
+# 2. Subreddit Distribution Donut Chart (with clean legend)
+# --------------------------------------------------------------------------
+
+# Distinct palette that works well for categorical data
+_SUBREDDIT_PALETTE = [
+    "#4E79A7", "#F28E2B", "#E15759", "#76B7B2", "#59A14F",
+    "#EDC948", "#B07AA1", "#FF9DA7", "#9C755F", "#BAB0AC",
+    "#86BCB6", "#8CD17D",
+]
 
 
 def generate_subreddit_pie(
@@ -71,7 +133,7 @@ def generate_subreddit_pie(
     output_dir: str = CHART_OUTPUT_DIR,
     top_n: int = 10,
 ) -> str:
-    """Pie chart: top N subreddits by mention count."""
+    """Donut chart: top N subreddits with a side legend (no overlapping labels)."""
     _ensure_output_dir(output_dir)
 
     subreddits = Counter(r["subreddit"] for r in results)
@@ -86,28 +148,63 @@ def generate_subreddit_pie(
         labels.append("Others")
         sizes.append(others)
 
-    fig, ax = plt.subplots(figsize=(10, 7))
-    cmap = plt.cm.Set3
-    colors = [cmap(i / max(len(labels), 1)) for i in range(len(labels))]
+    total = sum(sizes)
+    colors = [_SUBREDDIT_PALETTE[i % len(_SUBREDDIT_PALETTE)] for i in range(len(labels))]
 
-    wedges, texts, autotexts = ax.pie(
-        sizes, labels=labels, colors=colors, autopct="%1.1f%%",
-        startangle=90, textprops={"fontsize": 10}, pctdistance=0.85,
+    fig, ax = plt.subplots(figsize=(10, 7))
+
+    wedges, _ = ax.pie(
+        sizes,
+        colors=colors,
+        startangle=90,
+        wedgeprops={"width": DONUT_WIDTH, "edgecolor": "white", "linewidth": 2},
     )
-    for at in autotexts:
-        at.set_fontsize(9)
+
+    # Center text
+    ax.text(
+        0, 0, f"{total}\nposts",
+        ha="center", va="center",
+        fontsize=22, fontweight="bold", color="#333333",
+    )
+
+    # Side legend with counts & percentages — avoids label overlap entirely
+    legend_labels = [
+        f"{lbl}  —  {sz} ({sz / total * 100:.1f}%)"
+        for lbl, sz in zip(labels, sizes)
+    ]
+    legend = ax.legend(
+        wedges, legend_labels,
+        title="Subreddits",
+        title_fontproperties=fm.FontProperties(weight="bold", size=12),
+        loc="center left",
+        bbox_to_anchor=(1.0, 0.5),
+        fontsize=10,
+        frameon=True,
+        fancybox=True,
+        shadow=False,
+        framealpha=0.9,
+        edgecolor="#CCCCCC",
+    )
 
     ax.set_title(
-        f"Subreddit Distribution: {brand_name}\n({len(results)} relevant posts, last 3 months)",
-        fontsize=14, fontweight="bold", pad=20,
+        f"Subreddit Distribution — {brand_name}",
+        fontsize=16, fontweight="bold", color="#222222", pad=20,
+    )
+    fig.text(
+        0.40, 0.88, "Last 3 months",
+        ha="center", fontsize=11, color="#888888",
     )
 
     path = os.path.join(output_dir, f"{_safe_name(brand_name)}_subreddits.png")
     plt.tight_layout()
-    plt.savefig(path, dpi=150, bbox_inches="tight")
+    plt.savefig(path, dpi=180, bbox_inches="tight", facecolor="white")
     plt.close()
     return path
 
+
+# --------------------------------------------------------------------------
+# 3. Sentiment Trend Line Chart (polished)
+# --------------------------------------------------------------------------
 
 def generate_sentiment_trend(
     results: list[dict],
@@ -137,29 +234,44 @@ def generate_sentiment_trend(
     labels = [datetime.strptime(w, "%Y-%m-%d").strftime("%b %d") for w in weeks]
 
     fig, ax = plt.subplots(figsize=(12, 6))
-    ax.plot(labels, pos, "o-", color=SENTIMENT_COLORS["positive"],
-            label="Positive", linewidth=2, markersize=6)
-    ax.plot(labels, neg, "o-", color=SENTIMENT_COLORS["negative"],
-            label="Negative", linewidth=2, markersize=6)
-    ax.plot(labels, neu, "o-", color=SENTIMENT_COLORS["neutral"],
-            label="Neutral", linewidth=2, markersize=6)
 
-    ax.set_xlabel("Week", fontsize=12)
-    ax.set_ylabel("Number of Posts", fontsize=12)
+    ax.plot(labels, pos, "o-", color=SENTIMENT_COLORS["positive"],
+            label="Positive", linewidth=2.5, markersize=6, alpha=0.9)
+    ax.plot(labels, neg, "o-", color=SENTIMENT_COLORS["negative"],
+            label="Negative", linewidth=2.5, markersize=6, alpha=0.9)
+    ax.plot(labels, neu, "o-", color=SENTIMENT_COLORS["neutral"],
+            label="Neutral", linewidth=2.5, markersize=6, alpha=0.9)
+
+    # Light fill under curves
+    ax.fill_between(range(len(labels)), pos, alpha=0.08, color=SENTIMENT_COLORS["positive"])
+    ax.fill_between(range(len(labels)), neg, alpha=0.08, color=SENTIMENT_COLORS["negative"])
+
+    ax.set_xlabel("Week", fontsize=12, color="#555555")
+    ax.set_ylabel("Number of Posts", fontsize=12, color="#555555")
     ax.set_title(
-        f"Sentiment Trend: {brand_name}\n(Weekly, last 3 months)",
-        fontsize=14, fontweight="bold",
+        f"Sentiment Trend — {brand_name}",
+        fontsize=16, fontweight="bold", color="#222222",
     )
-    ax.legend(fontsize=11)
-    ax.grid(True, alpha=0.3)
+    fig.text(
+        0.5, 0.90, "Weekly, last 3 months",
+        ha="center", fontsize=11, color="#888888",
+    )
+    ax.legend(fontsize=11, frameon=True, fancybox=True, edgecolor="#CCCCCC")
+    ax.grid(True, alpha=0.2, linestyle="--")
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
     plt.xticks(rotation=45, ha="right")
 
     path = os.path.join(output_dir, f"{_safe_name(brand_name)}_trend.png")
     plt.tight_layout()
-    plt.savefig(path, dpi=150, bbox_inches="tight")
+    plt.savefig(path, dpi=180, bbox_inches="tight", facecolor="white")
     plt.close()
     return path
 
+
+# --------------------------------------------------------------------------
+# Helpers
+# --------------------------------------------------------------------------
 
 def _safe_name(name: str) -> str:
     """Sanitize brand name for use in file paths."""
