@@ -43,6 +43,10 @@ from sheets import SheetsWriter, export_results_csv
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("bot.log"),
+    ],
 )
 logger = logging.getLogger(__name__)
 
@@ -182,7 +186,23 @@ async def _run_research_pipeline(update: Update, brand_name: str, brand_config: 
 
         # -- Step 2: Analyze ------------------------------------------------
         analyzer = BrandAnalyzer()
-        results = await asyncio.to_thread(analyzer.process_posts, posts, brand_config)
+        loop = asyncio.get_running_loop()
+
+        def progress_callback(done, total, relevant):
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    bot.send_message(
+                        chat_id,
+                        f"Analyzed {done}/{total} posts ({relevant} relevant so far)...",
+                    ),
+                    loop,
+                )
+            except Exception:
+                pass
+
+        results = await asyncio.to_thread(
+            analyzer.process_posts, posts, brand_config, progress_callback
+        )
 
         if not results:
             await bot.send_message(
