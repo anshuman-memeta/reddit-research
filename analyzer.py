@@ -76,6 +76,7 @@ class BrandAnalyzer:
         self.api_key = api_key or GROQ_API_KEY
         self.model = model or GROQ_MODEL
         self.api_url = "https://api.groq.com/openai/v1/chat/completions"
+        self._rate_limited = False  # set when we hit 429, skip further calls
 
     # ----- Low-level LLM call ---------------------------------------------
 
@@ -86,7 +87,7 @@ class BrandAnalyzer:
         max_tokens: int = 256,
     ) -> Optional[str]:
         """Call Groq API, return raw content string. Returns None on failure."""
-        if not self.api_key:
+        if not self.api_key or self._rate_limited:
             return None
 
         headers = {
@@ -106,6 +107,8 @@ class BrandAnalyzer:
                     self.api_url, headers=headers, json=payload, timeout=60,
                 )
                 resp.raise_for_status()
+                # Success — clear rate-limit flag if it was set
+                self._rate_limited = False
                 content = resp.json()["choices"][0]["message"]["content"].strip()
                 return content
 
@@ -126,6 +129,7 @@ class BrandAnalyzer:
                     time.sleep(2)
 
         logger.warning("LLM call exhausted all retries")
+        self._rate_limited = True  # stop hammering, use fallback
         return None
 
     @staticmethod
@@ -285,19 +289,27 @@ class BrandAnalyzer:
         progress_callback: Optional[Callable[[int, int, int], None]] = None,
     ) -> list[dict]:
         """
-        Batch analysis pipeline. Sends up to 50 posts per LLM call.
+        Batch analysis pipeline. Sends up to BATCH_SIZE posts per LLM call.
         Falls back to single-post calls for any posts missing from the
         batch response, then keyword heuristics as last resort.
+
+        When Groq rate-limits us, we stop hammering the API and use keyword
+        fallback for the rest.  Each new batch resets the flag to try again.
         """
         results: list[dict] = []
         total = len(posts)
         logger.info(f"Starting batch analysis of {total} posts (batch size={BATCH_SIZE})...")
 
         processed = 0
+        fallback_count = 0
 
         for batch_start in range(0, total, BATCH_SIZE):
             batch = posts[batch_start : batch_start + BATCH_SIZE]
             batch_num = batch_start // BATCH_SIZE + 1
+
+            # Reset rate-limit flag each batch so we try the API once
+            self._rate_limited = False
+
             logger.info(
                 f"[Batch {batch_num}] Analysing posts "
                 f"{batch_start + 1}-{batch_start + len(batch)} of {total}..."
@@ -305,14 +317,20 @@ class BrandAnalyzer:
 
             # --- Try batch LLM call ---
             batch_results = self.analyze_batch(batch, brand_config)
+            batch_was_rate_limited = self._rate_limited
 
             for post in batch:
                 processed += 1
 
                 if post.post_id in batch_results:
                     analysis = batch_results[post.post_id]
+                elif batch_was_rate_limited:
+                    # Batch failed due to rate limits — don't hammer with
+                    # individual calls, go straight to keyword fallback
+                    analysis = self._keyword_fallback(post, brand_config)
+                    fallback_count += 1
                 else:
-                    # Post missing from batch response — fall back to single call
+                    # Batch succeeded but this post was missing from response
                     logger.info(
                         f"  Post {post.post_id} missing from batch, "
                         f"trying single call..."
@@ -350,9 +368,14 @@ class BrandAnalyzer:
             if progress_callback:
                 progress_callback(processed, total, len(results))
 
-            # Brief pause between batches to respect rate limits
+            # Pause between batches — longer if we just got rate-limited
             if batch_start + BATCH_SIZE < total:
-                time.sleep(3)
+                cooldown = 30 if batch_was_rate_limited else 5
+                if batch_was_rate_limited:
+                    logger.info(f"  Rate-limited — cooling down {cooldown}s before next batch")
+                time.sleep(cooldown)
 
+        if fallback_count:
+            logger.info(f"  ({fallback_count} posts used keyword fallback due to rate limits)")
         logger.info(f"Analysis complete: {len(results)} relevant out of {total} posts")
         return results
