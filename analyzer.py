@@ -62,7 +62,7 @@ Respond with ONLY a JSON array. One object per post, in the same order:
 
 Return ONLY the JSON array, no other text."""
 
-BATCH_SIZE = 50  # posts per LLM call
+BATCH_SIZE = 10  # posts per LLM call
 
 
 # --------------------------------------------------------------------------
@@ -170,7 +170,7 @@ class BrandAnalyzer:
         )
 
         # Allocate ~120 tokens per post for the response
-        max_tokens = min(len(posts) * 120, 8000)
+        max_tokens = min(len(posts) * 150, 4096)
 
         raw = self._call_llm(prompt, max_retries=4, max_tokens=max_tokens)
         if raw is None:

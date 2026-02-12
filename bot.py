@@ -181,7 +181,7 @@ async def _run_research_pipeline(update: Update, brand_name: str, brand_config: 
         await bot.send_message(
             chat_id,
             f"Found {len(posts)} posts. Filtering for relevance & analyzing sentiment...\n"
-            f"(processing in batches of 50 via LLM)",
+            f"(processing in batches of 10 via LLM)",
         )
 
         # -- Step 2: Analyze ------------------------------------------------
