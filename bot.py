@@ -292,7 +292,11 @@ async def _run_research_pipeline(update: Update, brand_name: str, brand_config: 
 async def add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update.effective_user.id):
         return ConversationHandler.END
-    await update.message.reply_text("Let's add a new brand.\n\n*Brand name?*", parse_mode="Markdown")
+    context.user_data.pop("new_brand", None)  # clear any stale state
+    await update.message.reply_text(
+        "Let's add a new brand.\n(Send /cancel anytime to abort)\n\n*Brand name?*",
+        parse_mode="Markdown",
+    )
     return BRAND_NAME
 
 
@@ -426,7 +430,10 @@ def main():
             SUBREDDIT_HINTS:[MessageHandler(filters.TEXT & ~filters.COMMAND, add_subreddit_hints)],
             DESCRIPTION:    [MessageHandler(filters.TEXT & ~filters.COMMAND, add_description)],
         },
-        fallbacks=[CommandHandler("cancel", add_cancel)],
+        fallbacks=[
+            CommandHandler("cancel", add_cancel),
+            CommandHandler("research_add", add_start),  # restart mid-conversation
+        ],
     )
     app.add_handler(conv)
 
@@ -456,7 +463,7 @@ def main():
     app.add_error_handler(error_handler)
 
     logger.info("Research bot starting...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 
 if __name__ == "__main__":
