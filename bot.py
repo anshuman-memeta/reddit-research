@@ -231,12 +231,17 @@ async def _run_research_pipeline(update: Update, brand_name: str, brand_config: 
 
         # -- Step 4: Google Sheet -------------------------------------------
         sheet_url = None
+        csv_path = None
         try:
             writer = SheetsWriter()
             sheet_url = await asyncio.to_thread(writer.create_research_sheet, brand_name, results)
         except Exception as e:
             logger.error(f"Google Sheets error: {e}")
-            await bot.send_message(chat_id, f"Could not create Google Sheet: {e}")
+            await bot.send_message(chat_id, f"Could not create Google Sheet: {e}\nExporting CSV instead...")
+            try:
+                csv_path = await asyncio.to_thread(export_results_csv, brand_name, results)
+            except Exception as csv_err:
+                logger.error(f"CSV export also failed: {csv_err}")
 
         # -- Step 5: Summary message ----------------------------------------
         sentiments = Counter(r["sentiment"] for r in results)
@@ -275,10 +280,20 @@ async def _run_research_pipeline(update: Update, brand_name: str, brand_config: 
             with open(path, "rb") as f:
                 await bot.send_photo(chat_id, photo=f)
 
+        # -- Step 7: Send CSV if Sheets failed ------------------------------
+        if csv_path:
+            with open(csv_path, "rb") as f:
+                await bot.send_document(chat_id, document=f, filename=os.path.basename(csv_path))
+
         # Cleanup
         for path in chart_paths:
             try:
                 os.remove(path)
+            except OSError:
+                pass
+        if csv_path:
+            try:
+                os.remove(csv_path)
             except OSError:
                 pass
 
@@ -319,20 +334,28 @@ async def add_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def add_keywords(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["new_brand"]["keywords"] = [
-        k.strip() for k in update.message.text.split(",") if k.strip()
-    ]
+    text = update.message.text.strip()
+    if text.lower() == "skip":
+        context.user_data["new_brand"]["keywords"] = []
+    else:
+        context.user_data["new_brand"]["keywords"] = [
+            k.strip() for k in text.split(",") if k.strip()
+        ]
     await update.message.reply_text(
-        "*Product terms?*\n(comma-separated context words)\nExample: stock, trading, mutual fund, demat",
+        "*Product terms?*\n(comma-separated context words)\nExample: stock, trading, mutual fund, demat\n\nType `skip` to skip.",
         parse_mode="Markdown",
     )
     return PRODUCT_TERMS
 
 
 async def add_product_terms(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["new_brand"]["product_terms"] = [
-        t.strip() for t in update.message.text.split(",") if t.strip()
-    ]
+    text = update.message.text.strip()
+    if text.lower() == "skip":
+        context.user_data["new_brand"]["product_terms"] = []
+    else:
+        context.user_data["new_brand"]["product_terms"] = [
+            t.strip() for t in text.split(",") if t.strip()
+        ]
     await update.message.reply_text(
         "*Competitors?*\n(comma-separated)\nExample: Groww, Zerodha, Angel One\n\nType `skip` to skip.",
         parse_mode="Markdown",
