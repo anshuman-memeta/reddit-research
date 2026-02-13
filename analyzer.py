@@ -64,6 +64,16 @@ Return ONLY the JSON array, no other text."""
 
 BATCH_SIZE = 10  # posts per LLM call
 
+_VALID_SENTIMENTS = {"positive", "negative", "neutral"}
+
+
+def _normalize_sentiment(value: str) -> str:
+    """Clamp sentiment to one of the three valid values."""
+    v = value.strip().lower()
+    if v in _VALID_SENTIMENTS:
+        return v
+    return "neutral"
+
 
 # --------------------------------------------------------------------------
 # Analyzer
@@ -199,7 +209,7 @@ class BrandAnalyzer:
                 results[pid] = None
             else:
                 results[pid] = {
-                    "sentiment": item.get("sentiment", "neutral"),
+                    "sentiment": _normalize_sentiment(item.get("sentiment", "neutral")),
                     "theme": item.get("theme", "general discussion"),
                     "summary": item.get("summary", ""),
                     "competitor_mentions": item.get("competitor_mentions", []),
@@ -232,7 +242,7 @@ class BrandAnalyzer:
                 if not result.get("relevant", False):
                     return None
                 return {
-                    "sentiment": result.get("sentiment", "neutral"),
+                    "sentiment": _normalize_sentiment(result.get("sentiment", "neutral")),
                     "theme": result.get("theme", "general discussion"),
                     "summary": result.get("summary", ""),
                     "competitor_mentions": result.get("competitor_mentions", []),
