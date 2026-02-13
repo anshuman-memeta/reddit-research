@@ -222,7 +222,8 @@ def generate_sentiment_trend(
         dt = datetime.strptime(r["created_date"], "%Y-%m-%d")
         week_start = dt - timedelta(days=dt.weekday())
         key = week_start.strftime("%Y-%m-%d")
-        weekly[key][r["sentiment"]] += 1
+        sentiment = r["sentiment"] if r["sentiment"] in SENTIMENT_COLORS else "neutral"
+        weekly[key][sentiment] += 1
 
     if not weekly:
         return None
