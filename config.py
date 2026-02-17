@@ -59,11 +59,6 @@ REDDIT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.3
 SEARCH_LOOKBACK_DAYS = 90
 REDDIT_RATE_LIMIT_DELAY = 2.0  # seconds between requests
 
-# Reddit OAuth API (recommended for VPS/datacenter IPs)
-# Create a "script" app at https://www.reddit.com/prefs/apps
-REDDIT_CLIENT_ID = os.getenv("REDDIT_CLIENT_ID", "")
-REDDIT_CLIENT_SECRET = os.getenv("REDDIT_CLIENT_SECRET", "")
-
 # Brands config path
 BRANDS_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "brands.json")
 
