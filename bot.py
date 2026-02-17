@@ -5,6 +5,7 @@ Reddit Research Bot - Telegram interface.
 Commands:
   /research <brand>   - Run a 3-month deep dive on a brand
   /research_add       - Onboard a new brand (interactive)
+  /research_delete <brand> - Delete a brand
   /research_list      - List all configured brands
   /help               - Show help
 """
@@ -52,6 +53,7 @@ logger = logging.getLogger(__name__)
 
 # ---- Conversation states for /research_add --------------------------------
 BRAND_NAME, CATEGORY, KEYWORDS, PRODUCT_TERMS, COMPETITORS, SUBREDDIT_HINTS, DESCRIPTION = range(7)
+DELETE_CONFIRM = 0  # single state for delete conversation
 
 
 # ---- Helpers --------------------------------------------------------------
@@ -82,6 +84,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Commands:\n"
         "/research <brand> \u2014 Deep dive (3 months)\n"
         "/research\\_add \u2014 Add a new brand\n"
+        "/research\\_delete <brand> \u2014 Delete a brand\n"
         "/research\\_list \u2014 List configured brands\n"
         "/help \u2014 Show this message",
         parse_mode="Markdown",
@@ -449,6 +452,88 @@ async def add_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+# ---- /research_delete (conversation with confirmation) --------------------
+
+async def delete_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update.effective_user.id):
+        return ConversationHandler.END
+
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: `/research_delete <brand_name>`", parse_mode="Markdown"
+        )
+        return ConversationHandler.END
+
+    brand_name = " ".join(context.args)
+    brands = load_brands().get("brands", {})
+
+    # Case-insensitive lookup
+    matched_name = None
+    matched_cfg = None
+    for name, cfg in brands.items():
+        if name.lower() == brand_name.lower():
+            matched_name = name
+            matched_cfg = cfg
+            break
+
+    if not matched_cfg:
+        available = ", ".join(brands.keys()) or "None"
+        await update.message.reply_text(
+            f"Brand '{brand_name}' not found.\n\nAvailable: {available}"
+        )
+        return ConversationHandler.END
+
+    context.user_data["delete_brand"] = matched_name
+    await update.message.reply_text(
+        f"*Delete brand: {matched_name}*\n\n"
+        f"Category: {matched_cfg.get('category', 'general')}\n"
+        f"Keywords: {', '.join(matched_cfg.get('keywords', []))}\n"
+        f"Product terms: {', '.join(matched_cfg.get('product_terms', []))}\n"
+        f"Competitors: {', '.join(matched_cfg.get('competitors', [])) or 'None'}\n"
+        f"Subreddits: {', '.join(matched_cfg.get('subreddit_hints', [])) or 'None'}\n\n"
+        f"Are you sure? Reply *YES* to confirm or /cancel to abort.",
+        parse_mode="Markdown",
+    )
+    return DELETE_CONFIRM
+
+
+async def delete_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    brand_name = context.user_data.pop("delete_brand", None)
+
+    if not brand_name:
+        await update.message.reply_text("No brand selected. Use /research\\_delete <brand>.")
+        return ConversationHandler.END
+
+    if text.upper() != "YES":
+        await update.message.reply_text("Deletion cancelled.")
+        return ConversationHandler.END
+
+    try:
+        brands = load_brands()
+        if brand_name in brands.get("brands", {}):
+            del brands["brands"][brand_name]
+            save_brands(brands)
+            logger.info(f"Brand '{brand_name}' deleted from {BRANDS_CONFIG_PATH}")
+            await update.message.reply_text(
+                f"*{brand_name}* has been deleted.\n\n"
+                f"Use /research\\_add to re-add it with updated details.",
+                parse_mode="Markdown",
+            )
+        else:
+            await update.message.reply_text(f"Brand '{brand_name}' was already removed.")
+    except Exception as e:
+        logger.error(f"delete_confirm failed: {e}", exc_info=True)
+        await update.message.reply_text(f"Error deleting brand: {e}")
+    return ConversationHandler.END
+
+
+async def delete_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop("delete_brand", None)
+    await update.message.reply_text("Deletion cancelled.")
+    return ConversationHandler.END
+
+
 # ---- Bot setup & main -----------------------------------------------------
 
 def main():
@@ -483,11 +568,24 @@ def main():
     )
     app.add_handler(conv)
 
+    # Conversation: /research_delete
+    delete_conv = ConversationHandler(
+        entry_points=[CommandHandler("research_delete", delete_start)],
+        states={
+            DELETE_CONFIRM: [MessageHandler(filters.TEXT & ~filters.COMMAND, delete_confirm)],
+        },
+        fallbacks=[
+            CommandHandler("cancel", delete_cancel),
+        ],
+    )
+    app.add_handler(delete_conv)
+
     # Register commands in Telegram menu
     async def post_init(application):
         await application.bot.set_my_commands([
             BotCommand("research", "Deep dive on a brand (3 months)"),
             BotCommand("research_add", "Add a new brand"),
+            BotCommand("research_delete", "Delete a brand"),
             BotCommand("research_list", "List configured brands"),
             BotCommand("help", "Show help"),
         ])
