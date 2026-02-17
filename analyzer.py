@@ -13,7 +13,7 @@ from typing import Callable, Optional
 
 import requests
 
-from config import GROQ_API_KEY, GROQ_MODEL
+from config import GROQ_API_KEY, GROQ_MODEL, LLM_PROVIDERS
 from fetcher import RedditPost
 
 logger = logging.getLogger(__name__)
@@ -79,46 +79,69 @@ def _normalize_sentiment(value: str) -> str:
 # Analyzer
 # --------------------------------------------------------------------------
 
+_UNSET = object()  # sentinel to distinguish "no arg" from "passed None"
+
+
 class BrandAnalyzer:
     """Batch LLM pipeline: relevance filter + sentiment analysis."""
 
-    def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None):
-        self.api_key = api_key or GROQ_API_KEY
-        self.model = model or GROQ_MODEL
-        self.api_url = "https://api.groq.com/openai/v1/chat/completions"
-        self._rate_limited = False  # set when we hit 429, skip further calls
+    def __init__(self, api_key=_UNSET, model=_UNSET):
+        # Build the provider chain.  When explicit api_key/model are passed
+        # (e.g. tests with api_key=None), use only that single provider.
+        if api_key is not _UNSET or model is not _UNSET:
+            key = api_key if api_key is not _UNSET else GROQ_API_KEY
+            mdl = model if model is not _UNSET else GROQ_MODEL
+            self.providers = [
+                {
+                    "name": "Groq",
+                    "api_url": "https://api.groq.com/openai/v1/chat/completions",
+                    "api_key": key,
+                    "model": mdl,
+                }
+            ]
+        else:
+            # Use the configured fallback chain, skip providers without keys
+            self.providers = [p for p in LLM_PROVIDERS if p.get("api_key")]
+
+        # Per-provider rate-limit tracking
+        self._rate_limited: dict[str, bool] = {
+            p["name"]: False for p in self.providers
+        }
 
     # ----- Low-level LLM call ---------------------------------------------
 
-    def _call_llm(
+    def _call_single_provider(
         self,
+        provider: dict,
         prompt: str,
-        max_retries: int = 3,
-        max_tokens: int = 256,
+        max_retries: int,
+        max_tokens: int,
     ) -> Optional[str]:
-        """Call Groq API, return raw content string. Returns None on failure."""
-        if not self.api_key or self._rate_limited:
+        """Call one provider's API. Returns content string or None."""
+        name = provider["name"]
+
+        if not provider.get("api_key") or self._rate_limited.get(name):
             return None
 
         headers = {
-            "Authorization": f"Bearer {self.api_key}",
+            "Authorization": f"Bearer {provider['api_key']}",
             "Content-Type": "application/json",
         }
         payload = {
-            "model": self.model,
+            "model": provider["model"],
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.1,
             "max_tokens": max_tokens,
+            "response_format": {"type": "json_object"},
         }
 
         for attempt in range(max_retries):
             try:
                 resp = requests.post(
-                    self.api_url, headers=headers, json=payload, timeout=60,
+                    provider["api_url"], headers=headers, json=payload, timeout=60,
                 )
                 resp.raise_for_status()
-                # Success — clear rate-limit flag if it was set
-                self._rate_limited = False
+                self._rate_limited[name] = False
                 content = resp.json()["choices"][0]["message"]["content"].strip()
                 return content
 
@@ -126,21 +149,50 @@ class BrandAnalyzer:
                 if resp.status_code == 429:
                     wait = 10 * (attempt + 1)
                     logger.warning(
-                        f"Groq rate-limited (attempt {attempt+1}/{max_retries}), "
+                        f"{name} rate-limited (attempt {attempt+1}/{max_retries}), "
                         f"waiting {wait}s..."
                     )
                     time.sleep(wait)
                     continue
-                logger.error(f"Groq HTTP error: {resp.status_code} {resp.text[:200]}")
+                logger.error(f"{name} HTTP error: {resp.status_code} {resp.text[:200]}")
                 return None
             except Exception as e:
-                logger.error(f"LLM call failed (attempt {attempt + 1}): {e}")
+                logger.error(f"{name} call failed (attempt {attempt + 1}): {e}")
                 if attempt < max_retries - 1:
                     time.sleep(2)
 
-        logger.warning("LLM call exhausted all retries")
-        self._rate_limited = True  # stop hammering, use fallback
+        logger.warning(f"{name} exhausted all retries")
+        self._rate_limited[name] = True
         return None
+
+    def _call_llm(
+        self,
+        prompt: str,
+        max_retries: int = 3,
+        max_tokens: int = 256,
+    ) -> Optional[str]:
+        """Try each provider in order until one succeeds."""
+        for provider in self.providers:
+            name = provider["name"]
+            if self._rate_limited.get(name):
+                continue
+
+            result = self._call_single_provider(
+                provider, prompt, max_retries, max_tokens,
+            )
+            if result is not None:
+                return result
+
+            # Provider failed — log and try the next one
+            if len(self.providers) > 1:
+                logger.info(f"  {name} failed, trying next provider...")
+
+        return None
+
+    @property
+    def _all_rate_limited(self) -> bool:
+        """True when every configured provider is rate-limited."""
+        return all(self._rate_limited.get(p["name"]) for p in self.providers)
 
     @staticmethod
     def _parse_json(raw: str):
@@ -317,8 +369,9 @@ class BrandAnalyzer:
             batch = posts[batch_start : batch_start + BATCH_SIZE]
             batch_num = batch_start // BATCH_SIZE + 1
 
-            # Reset rate-limit flag each batch so we try the API once
-            self._rate_limited = False
+            # Reset rate-limit flags each batch so we retry providers
+            for name in self._rate_limited:
+                self._rate_limited[name] = False
 
             logger.info(
                 f"[Batch {batch_num}] Analysing posts "
@@ -327,7 +380,7 @@ class BrandAnalyzer:
 
             # --- Try batch LLM call ---
             batch_results = self.analyze_batch(batch, brand_config)
-            batch_was_rate_limited = self._rate_limited
+            batch_was_rate_limited = self._all_rate_limited
 
             for post in batch:
                 processed += 1

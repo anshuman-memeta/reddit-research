@@ -12,7 +12,41 @@ AUTHORIZED_USERS = json.loads(os.getenv("AUTHORIZED_USERS", "[]"))
 
 # Groq API (LLM for relevance + sentiment)
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-GROQ_MODEL = "llama-3.3-70b-versatile"
+GROQ_MODEL = "llama-3.1-8b-instant"
+
+# Multi-provider LLM fallback chain (tried in order)
+# Each provider uses the OpenAI-compatible chat completions API.
+# Only providers with a configured API key are active.
+CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY", "")
+SAMBANOVA_API_KEY = os.getenv("SAMBANOVA_API_KEY", "")
+MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
+
+LLM_PROVIDERS = [
+    {
+        "name": "Groq",
+        "api_url": "https://api.groq.com/openai/v1/chat/completions",
+        "api_key": GROQ_API_KEY,
+        "model": GROQ_MODEL,
+    },
+    {
+        "name": "Cerebras",
+        "api_url": "https://api.cerebras.ai/v1/chat/completions",
+        "api_key": CEREBRAS_API_KEY,
+        "model": "llama-3.3-70b",
+    },
+    {
+        "name": "SambaNova",
+        "api_url": "https://api.sambanova.ai/v1/chat/completions",
+        "api_key": SAMBANOVA_API_KEY,
+        "model": "Meta-Llama-3.3-70B-Instruct",
+    },
+    {
+        "name": "Mistral",
+        "api_url": "https://api.mistral.ai/v1/chat/completions",
+        "api_key": MISTRAL_API_KEY,
+        "model": "mistral-small-latest",
+    },
+]
 
 # Google Sheets
 GOOGLE_SHEETS_CREDS_FILE = os.getenv(
