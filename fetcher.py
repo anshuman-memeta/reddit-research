@@ -4,15 +4,19 @@ Multi-source Reddit post fetcher.
 Sources (in priority order):
   1. Arctic Shift API (primary — reliable from datacenter IPs)
   2. Reddit search JSON endpoint (secondary — often 403 from VPS IPs)
-  3. Pullpush.io API (fallback, unreliable)
+  3. Reddit RSS feeds (alternate — sometimes bypasses 403 blocking)
+  4. Pullpush.io API (fallback, unreliable)
 
 All sources are deduplicated by post ID before returning.
 """
 
 import logging
+import re
 import time
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from typing import Callable, Optional
 
 import requests
@@ -82,12 +86,36 @@ class ArcticShiftFetcher:
             "Accept": "application/json",
         })
         self.rate_limit = rate_limit
+        self._reachable: Optional[bool] = None  # cached connectivity result
+
+    def check_connectivity(self, timeout: float = 15) -> bool:
+        """Quick connectivity test — returns True if Arctic Shift responds."""
+        if self._reachable is not None:
+            return self._reachable
+        for attempt in range(3):
+            try:
+                resp = self.session.get(
+                    self.BASE_URL,
+                    params={"query": "test", "subreddit": "all", "limit": 1},
+                    timeout=timeout,
+                )
+                resp.raise_for_status()
+                self._reachable = True
+                return True
+            except Exception as e:
+                if attempt < 2:
+                    time.sleep(2 * (attempt + 1))
+                    logger.warning(f"Arctic Shift connectivity check attempt {attempt + 1} failed: {e}")
+                else:
+                    logger.error(f"Arctic Shift unreachable after 3 connectivity checks: {e}")
+        self._reachable = False
+        return False
 
     def search_subreddit(self, subreddit: str, query: str,
                          after_date: Optional[str] = None,
                          limit: int = 100,
                          max_pages: int = 10,
-                         max_retries: int = 2) -> list[RedditPost]:
+                         max_retries: int = 3) -> list[RedditPost]:
         """
         Search within a specific subreddit with retry logic.
 
@@ -119,7 +147,7 @@ class ArcticShiftFetcher:
             last_error = None
             for attempt in range(max_retries + 1):
                 try:
-                    resp = self.session.get(self.BASE_URL, params=params, timeout=30)
+                    resp = self.session.get(self.BASE_URL, params=params, timeout=45)
                     resp.raise_for_status()
                     data = resp.json()
                     break
@@ -133,9 +161,10 @@ class ArcticShiftFetcher:
                         logger.error(f"Arctic Shift error (r/{subreddit}, page {page}): {e}")
 
             if data is None:
-                # If the first page failed entirely, raise so caller can count the error
-                if page == 0 and last_error:
-                    raise last_error
+                # Return what we have so far instead of raising — let the caller
+                # handle partial results and decide whether to retry this sub.
+                if last_error:
+                    logger.warning(f"Arctic Shift r/{subreddit} page {page} failed, returning {len(posts)} posts collected so far")
                 break
 
             results = data.get("data", [])
@@ -330,7 +359,184 @@ class RedditSearchFetcher:
 
 
 # ---------------------------------------------------------------------------
-# Source 3: Pullpush.io (unreliable fallback)
+# Source 3: Reddit RSS feeds (sometimes bypasses JSON 403 blocking)
+# ---------------------------------------------------------------------------
+
+class RedditRSSFetcher:
+    """
+    Fetches posts from Reddit's RSS/Atom feeds.
+    RSS endpoints are sometimes accessible even when JSON search returns 403.
+    Limited to ~25 results per request (no deep pagination), but useful as
+    a supplementary source.
+    """
+
+    ENDPOINTS = [
+        "https://www.reddit.com",
+        "https://old.reddit.com",
+    ]
+
+    def __init__(self, user_agent: str = REDDIT_USER_AGENT, rate_limit: float = REDDIT_RATE_LIMIT_DELAY):
+        self.session = requests.Session()
+        self.session.headers.update({
+            "User-Agent": user_agent,
+            "Accept": "application/rss+xml, application/xml, text/xml, */*",
+            "Accept-Language": "en-US,en;q=0.9",
+        })
+        self.rate_limit = rate_limit
+
+    def _extract_post_id(self, link: str) -> str:
+        """Extract post ID from a Reddit URL like /r/sub/comments/ID/..."""
+        match = re.search(r"/comments/([a-z0-9]+)", link)
+        return match.group(1) if match else ""
+
+    def _parse_rss(self, content: str) -> list[RedditPost]:
+        """Parse Reddit RSS XML into RedditPost objects."""
+        posts = []
+        try:
+            root = ET.fromstring(content)
+        except ET.ParseError as e:
+            logger.warning(f"RSS XML parse error: {e}")
+            return posts
+
+        # Handle both RSS 2.0 (<item>) and Atom (<entry>) formats
+        ns = {"atom": "http://www.w3.org/2005/Atom"}
+
+        # Try Atom format first (Reddit typically returns Atom)
+        entries = root.findall(".//atom:entry", ns)
+        if entries:
+            for entry in entries:
+                title = entry.findtext("atom:title", "", ns)
+                link = entry.findtext("atom:link[@href]", "", ns)
+                # Get href from link element
+                link_elem = entry.find("atom:link", ns)
+                if link_elem is not None:
+                    link = link_elem.get("href", "")
+                content_elem = entry.find("atom:content", ns)
+                selftext = content_elem.text if content_elem is not None and content_elem.text else ""
+                updated = entry.findtext("atom:updated", "", ns)
+                author_elem = entry.find("atom:author/atom:name", ns)
+                author = author_elem.text if author_elem is not None else "[unknown]"
+                # Strip /u/ prefix from author
+                if author.startswith("/u/"):
+                    author = author[3:]
+
+                post_id = self._extract_post_id(link)
+                if not post_id:
+                    continue
+
+                # Parse date
+                created_utc = 0.0
+                if updated:
+                    try:
+                        dt = datetime.fromisoformat(updated.replace("Z", "+00:00"))
+                        created_utc = dt.timestamp()
+                    except (ValueError, TypeError):
+                        pass
+
+                # Extract subreddit from link
+                sub_match = re.search(r"/r/([^/]+)", link)
+                subreddit = sub_match.group(1) if sub_match else ""
+
+                posts.append(RedditPost(
+                    post_id=post_id,
+                    title=title,
+                    selftext=selftext,
+                    subreddit=subreddit,
+                    author=author,
+                    url=link,
+                    permalink=link,
+                    score=0,  # RSS doesn't include score
+                    num_comments=0,
+                    created_utc=created_utc,
+                ))
+            return posts
+
+        # Fallback: RSS 2.0 format (<item>)
+        for item in root.findall(".//item"):
+            title = item.findtext("title", "")
+            link = item.findtext("link", "")
+            selftext = item.findtext("description", "")
+            pub_date = item.findtext("pubDate", "")
+
+            post_id = self._extract_post_id(link)
+            if not post_id:
+                continue
+
+            created_utc = 0.0
+            if pub_date:
+                try:
+                    dt = parsedate_to_datetime(pub_date)
+                    created_utc = dt.timestamp()
+                except (ValueError, TypeError):
+                    pass
+
+            sub_match = re.search(r"/r/([^/]+)", link)
+            subreddit = sub_match.group(1) if sub_match else ""
+
+            posts.append(RedditPost(
+                post_id=post_id,
+                title=title,
+                selftext=selftext or "",
+                subreddit=subreddit,
+                author="[rss]",
+                url=link,
+                permalink=link,
+                score=0,
+                num_comments=0,
+                created_utc=created_utc,
+            ))
+
+        return posts
+
+    def search(self, query: str, max_retries: int = 2) -> list[RedditPost]:
+        """Global search via RSS. Returns up to ~25 results."""
+        path = f"/search.rss?q={requests.utils.quote(query)}&sort=new&t=year"
+        for base in self.ENDPOINTS:
+            url = f"{base}{path}"
+            for attempt in range(max_retries):
+                try:
+                    resp = self.session.get(url, timeout=20)
+                    if resp.status_code in (403, 429):
+                        logger.warning(f"RSS {resp.status_code} on {url}")
+                        break  # Try next endpoint
+                    resp.raise_for_status()
+                    return self._parse_rss(resp.text)
+                except requests.exceptions.HTTPError:
+                    break
+                except Exception as e:
+                    if attempt < max_retries - 1:
+                        time.sleep(2)
+                    else:
+                        logger.warning(f"RSS search error: {e}")
+            time.sleep(self.rate_limit)
+        return []
+
+    def search_subreddit(self, subreddit: str, query: str, max_retries: int = 2) -> list[RedditPost]:
+        """Search within a subreddit via RSS. Returns up to ~25 results."""
+        path = f"/r/{subreddit}/search.rss?q={requests.utils.quote(query)}&restrict_sr=on&sort=new&t=year"
+        for base in self.ENDPOINTS:
+            url = f"{base}{path}"
+            for attempt in range(max_retries):
+                try:
+                    resp = self.session.get(url, timeout=20)
+                    if resp.status_code in (403, 429):
+                        logger.warning(f"RSS {resp.status_code} on {url}")
+                        break
+                    resp.raise_for_status()
+                    return self._parse_rss(resp.text)
+                except requests.exceptions.HTTPError:
+                    break
+                except Exception as e:
+                    if attempt < max_retries - 1:
+                        time.sleep(2)
+                    else:
+                        logger.warning(f"RSS r/{subreddit} search error: {e}")
+            time.sleep(self.rate_limit)
+        return []
+
+
+# ---------------------------------------------------------------------------
+# Source 4: Pullpush.io (unreliable fallback)
 # ---------------------------------------------------------------------------
 
 class PullpushFetcher:
@@ -420,6 +626,7 @@ class MultiSourceFetcher:
     def __init__(self, user_agent: str = REDDIT_USER_AGENT):
         self.arctic = ArcticShiftFetcher()
         self.reddit = RedditSearchFetcher(user_agent=user_agent)
+        self.rss = RedditRSSFetcher(user_agent=user_agent)
         self.pullpush = PullpushFetcher()
         self.errors: list[str] = []  # Collects error details for diagnostics
 
@@ -456,36 +663,52 @@ class MultiSourceFetcher:
             if s.lower() not in [x.lower() for x in arctic_subs]:
                 arctic_subs.append(s)
 
+        # Quick connectivity check before committing to the full search loop.
+        # This saves minutes of timeouts if Arctic Shift is unreachable.
         arctic_errors = 0
-        consecutive_failures = 0
-        last_arctic_error = ""
-        for sub in arctic_subs:
-            # If Arctic Shift is consistently failing, skip remaining subs
-            if consecutive_failures >= 3:
-                remaining = len(arctic_subs) - arctic_subs.index(sub)
-                logger.warning(f"Arctic Shift: 3 consecutive failures, skipping {remaining} remaining subs")
-                if progress_callback:
-                    progress_callback(f"Arctic Shift unreachable ({last_arctic_error}), skipping to other sources...")
-                break
+        arctic_reachable = self.arctic.check_connectivity()
+        if not arctic_reachable:
+            logger.warning("Arctic Shift failed connectivity check, skipping entirely")
+            if progress_callback:
+                progress_callback("Arctic Shift unreachable (failed connectivity check), skipping to other sources...")
+            self.errors.append("Arctic Shift: unreachable (failed connectivity pre-check)")
+        else:
+            consecutive_sub_failures = 0  # count per-subreddit, not per-keyword
+            last_arctic_error = ""
+            for sub in arctic_subs:
+                # If Arctic Shift is consistently failing across subreddits, skip the rest
+                if consecutive_sub_failures >= 5:
+                    remaining = len(arctic_subs) - arctic_subs.index(sub)
+                    logger.warning(f"Arctic Shift: 5 consecutive subreddit failures, skipping {remaining} remaining subs")
+                    if progress_callback:
+                        progress_callback(f"Arctic Shift failing ({last_arctic_error}), skipping {remaining} remaining subs...")
+                    break
 
-            for kw in keywords:
-                try:
-                    posts = self.arctic.search_subreddit(
-                        subreddit=sub, query=kw, after_date=after_date, max_pages=5)
-                    consecutive_failures = 0  # Reset on success
-                    new = 0
-                    for p in posts:
-                        if p.post_id not in all_posts:
-                            all_posts[p.post_id] = p
-                            new += 1
-                    if posts:
-                        logger.info(f"  Arctic Shift r/{sub} '{kw}': {len(posts)} raw, {new} new")
-                except Exception as e:
-                    arctic_errors += 1
-                    consecutive_failures += 1
-                    last_arctic_error = str(e)
-                    self.errors.append(f"Arctic Shift r/{sub} '{kw}': {e}")
-                    logger.error(f"  Arctic Shift r/{sub} failed for '{kw}': {e}")
+                sub_had_success = False
+                for kw in keywords:
+                    try:
+                        posts = self.arctic.search_subreddit(
+                            subreddit=sub, query=kw, after_date=after_date, max_pages=5)
+                        sub_had_success = True  # at least one keyword succeeded for this sub
+                        new = 0
+                        for p in posts:
+                            if p.post_id not in all_posts:
+                                all_posts[p.post_id] = p
+                                new += 1
+                        if posts:
+                            logger.info(f"  Arctic Shift r/{sub} '{kw}': {len(posts)} raw, {new} new")
+                    except Exception as e:
+                        arctic_errors += 1
+                        last_arctic_error = str(e)
+                        self.errors.append(f"Arctic Shift r/{sub} '{kw}': {e}")
+                        logger.error(f"  Arctic Shift r/{sub} failed for '{kw}': {e}")
+
+                if sub_had_success:
+                    consecutive_sub_failures = 0
+                else:
+                    consecutive_sub_failures += 1
+                    # Brief pause before trying next subreddit to let transient issues clear
+                    time.sleep(2)
 
         arctic_count = len(all_posts)
         diag = f"Arctic Shift: {arctic_count} posts from {len(arctic_subs)} subs"
@@ -526,13 +749,46 @@ class MultiSourceFetcher:
                     logger.error(f"  r/{sub} search failed for '{kw}': {e}")
 
         reddit_added = len(all_posts) - arctic_count
-        diag = f"Reddit: +{reddit_added} new posts"
+        diag = f"Reddit JSON: +{reddit_added} new posts"
         if reddit_errors:
             diag += f" ({reddit_errors} errors)"
         diagnostics.append(diag)
-        logger.info(f"Reddit added: {reddit_added} new posts ({reddit_errors} errors)")
+        logger.info(f"Reddit JSON added: {reddit_added} new posts ({reddit_errors} errors)")
 
-        # --- Source 3: Pullpush (fallback) ------------------------------------
+        # --- Source 3: Reddit RSS feeds (alternate, bypasses some 403s) --------
+        pre_rss = len(all_posts)
+        rss_errors = 0
+        for kw in keywords:
+            try:
+                posts = self.rss.search(query=kw)
+                for p in posts:
+                    if p.created_utc >= after_ts and p.post_id and p.post_id not in all_posts:
+                        all_posts[p.post_id] = p
+                logger.info(f"  RSS '{kw}': {len(posts)} raw")
+            except Exception as e:
+                rss_errors += 1
+                logger.error(f"  RSS search failed for '{kw}': {e}")
+
+        # Targeted subreddit RSS searches
+        for sub in subreddit_hints[:5]:  # limit to avoid excessive requests
+            for kw in keywords:
+                try:
+                    posts = self.rss.search_subreddit(subreddit=sub, query=kw)
+                    for p in posts:
+                        if p.created_utc >= after_ts and p.post_id and p.post_id not in all_posts:
+                            all_posts[p.post_id] = p
+                except Exception as e:
+                    rss_errors += 1
+                    logger.error(f"  RSS r/{sub} search failed for '{kw}': {e}")
+
+        rss_added = len(all_posts) - pre_rss
+        diag = f"RSS: +{rss_added} new posts"
+        if rss_errors:
+            diag += f" ({rss_errors} errors)"
+        diagnostics.append(diag)
+        logger.info(f"Reddit RSS added: {rss_added} new posts ({rss_errors} errors)")
+
+        # --- Source 4: Pullpush (fallback) ------------------------------------
         if progress_callback:
             progress_callback(f"Total so far: {len(all_posts)}. Trying Pullpush...")
 
