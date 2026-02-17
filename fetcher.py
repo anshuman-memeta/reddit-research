@@ -54,26 +54,45 @@ class RedditPost:
 
 class RedditSearchFetcher:
     """
-    Fetches posts via https://www.reddit.com/search.json
+    Fetches posts via Reddit search JSON endpoints.
     No authentication required.  Paginated via `after` token.
+    Falls back from www.reddit.com → old.reddit.com on persistent 403s.
     """
 
-    BASE_URL = "https://www.reddit.com/search.json"
+    ENDPOINTS = [
+        "https://www.reddit.com",
+        "https://old.reddit.com",
+    ]
 
     def __init__(self, user_agent: str = REDDIT_USER_AGENT, rate_limit: float = REDDIT_RATE_LIMIT_DELAY):
         self.session = requests.Session()
-        self.session.headers.update({"User-Agent": user_agent})
+        self.session.headers.update({
+            "User-Agent": user_agent,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,application/json,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Connection": "keep-alive",
+        })
         self.rate_limit = rate_limit
+        # Track which endpoint works; start with first
+        self._working_endpoint_idx = 0
 
     def _get_with_retry(self, url: str, params: dict, max_retries: int = 3) -> Optional[dict]:
-        """GET with retry on 403/429 errors."""
+        """GET with retry on 403/429 errors. Falls back to old.reddit.com on persistent 403."""
         for attempt in range(max_retries):
             try:
                 resp = self.session.get(url, params=params, timeout=30)
-                if resp.status_code in (403, 429):
+                if resp.status_code == 429:
                     wait = 3 * (attempt + 1)
-                    logger.warning(f"Reddit {resp.status_code}, retrying in {wait}s...")
+                    logger.warning(f"Reddit 429 rate-limited, retrying in {wait}s...")
                     time.sleep(wait)
+                    continue
+                if resp.status_code == 403:
+                    logger.warning(f"Reddit 403 on {url} (attempt {attempt + 1})")
+                    # Try next endpoint on second failure
+                    if attempt >= 1:
+                        return None  # Signal caller to try fallback endpoint
+                    time.sleep(3 * (attempt + 1))
                     continue
                 resp.raise_for_status()
                 return resp.json()
@@ -82,6 +101,19 @@ class RedditSearchFetcher:
                     time.sleep(2)
                     continue
                 raise
+        return None
+
+    def _search_with_fallback(self, path: str, params: dict) -> Optional[dict]:
+        """Try each endpoint until one succeeds."""
+        endpoints = self.ENDPOINTS[self._working_endpoint_idx:] + self.ENDPOINTS[:self._working_endpoint_idx]
+        for i, base in enumerate(endpoints):
+            url = f"{base}{path}"
+            data = self._get_with_retry(url, params)
+            if data is not None:
+                # Remember which endpoint worked
+                self._working_endpoint_idx = self.ENDPOINTS.index(base)
+                return data
+            logger.warning(f"Endpoint {base} failed for {path}, trying next...")
         return None
 
     def search(self, query: str, sort: str = "new", time_filter: str = "year",
@@ -102,7 +134,7 @@ class RedditSearchFetcher:
                 params["after"] = after
 
             try:
-                data = self._get_with_retry(self.BASE_URL, params)
+                data = self._search_with_fallback("/search.json", params)
                 if data is None:
                     break
             except Exception as e:
@@ -140,7 +172,7 @@ class RedditSearchFetcher:
                          time_filter: str = "year", limit: int = 100,
                          max_pages: int = 5) -> list[RedditPost]:
         """Search within a specific subreddit."""
-        url = f"https://www.reddit.com/r/{subreddit}/search.json"
+        path = f"/r/{subreddit}/search.json"
         posts: list[RedditPost] = []
         after: Optional[str] = None
 
@@ -157,7 +189,7 @@ class RedditSearchFetcher:
                 params["after"] = after
 
             try:
-                data = self._get_with_retry(url, params)
+                data = self._search_with_fallback(path, params)
                 if data is None:
                     break
             except Exception as e:
@@ -415,12 +447,21 @@ class MultiSourceFetcher:
         logger.info(f"Reddit total: {reddit_count} unique posts")
 
         # --- Source 2: Arctic Shift (secondary, subreddit-scoped) ----------
-        # Arctic Shift only supports full-text search within a subreddit
+        # Arctic Shift only supports full-text search within a subreddit.
+        # If no subreddit_hints and Reddit returned nothing, try common subs.
         if progress_callback:
             progress_callback(f"Found {reddit_count} from Reddit. Checking Arctic Shift...")
 
+        arctic_subs = list(subreddit_hints)
+        if reddit_count == 0 and not arctic_subs:
+            arctic_subs = [
+                "india", "IndianGaming", "IndianConsumer",
+                "gadgets", "technology", "BuyItForLife",
+            ]
+            logger.info("Reddit returned 0 and no subreddit_hints — using fallback subs for Arctic Shift")
+
         after_date = (datetime.now(tz=timezone.utc) - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
-        for sub in subreddit_hints:
+        for sub in arctic_subs:
             for kw in keywords:
                 try:
                     posts = self.arctic.search_subreddit(
