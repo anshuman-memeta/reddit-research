@@ -77,6 +77,10 @@ class ArcticShiftFetcher:
 
     def __init__(self, rate_limit: float = 1.0):
         self.session = requests.Session()
+        self.session.headers.update({
+            "User-Agent": REDDIT_USER_AGENT,
+            "Accept": "application/json",
+        })
         self.rate_limit = rate_limit
 
     def search_subreddit(self, subreddit: str, query: str,
@@ -112,6 +116,7 @@ class ArcticShiftFetcher:
                 params["before"] = before_date
 
             data = None
+            last_error = None
             for attempt in range(max_retries + 1):
                 try:
                     resp = self.session.get(self.BASE_URL, params=params, timeout=30)
@@ -119,6 +124,7 @@ class ArcticShiftFetcher:
                     data = resp.json()
                     break
                 except Exception as e:
+                    last_error = e
                     if attempt < max_retries:
                         wait = 2 * (attempt + 1)
                         logger.warning(f"Arctic Shift r/{subreddit} attempt {attempt + 1} failed: {e}, retrying in {wait}s...")
@@ -127,6 +133,9 @@ class ArcticShiftFetcher:
                         logger.error(f"Arctic Shift error (r/{subreddit}, page {page}): {e}")
 
             if data is None:
+                # If the first page failed entirely, raise so caller can count the error
+                if page == 0 and last_error:
+                    raise last_error
                 break
 
             results = data.get("data", [])
@@ -331,6 +340,10 @@ class PullpushFetcher:
 
     def __init__(self, rate_limit: float = 1.0):
         self.session = requests.Session()
+        self.session.headers.update({
+            "User-Agent": REDDIT_USER_AGENT,
+            "Accept": "application/json",
+        })
         self.rate_limit = rate_limit
 
     def search(self, query: str, after_ts: Optional[int] = None,
@@ -408,6 +421,7 @@ class MultiSourceFetcher:
         self.arctic = ArcticShiftFetcher()
         self.reddit = RedditSearchFetcher(user_agent=user_agent)
         self.pullpush = PullpushFetcher()
+        self.errors: list[str] = []  # Collects error details for diagnostics
 
     def fetch_all(
         self,
@@ -426,6 +440,7 @@ class MultiSourceFetcher:
         keywords = brand_config.get("keywords", [])
         subreddit_hints = brand_config.get("subreddit_hints", [])
         diagnostics: list[str] = []  # Track per-source results for reporting
+        self.errors = []  # Reset error log
 
         after_ts = int((datetime.now(tz=timezone.utc) - timedelta(days=lookback_days)).timestamp())
         after_date = (datetime.now(tz=timezone.utc) - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
@@ -442,11 +457,22 @@ class MultiSourceFetcher:
                 arctic_subs.append(s)
 
         arctic_errors = 0
+        consecutive_failures = 0
+        last_arctic_error = ""
         for sub in arctic_subs:
+            # If Arctic Shift is consistently failing, skip remaining subs
+            if consecutive_failures >= 3:
+                remaining = len(arctic_subs) - arctic_subs.index(sub)
+                logger.warning(f"Arctic Shift: 3 consecutive failures, skipping {remaining} remaining subs")
+                if progress_callback:
+                    progress_callback(f"Arctic Shift unreachable ({last_arctic_error}), skipping to other sources...")
+                break
+
             for kw in keywords:
                 try:
                     posts = self.arctic.search_subreddit(
                         subreddit=sub, query=kw, after_date=after_date, max_pages=5)
+                    consecutive_failures = 0  # Reset on success
                     new = 0
                     for p in posts:
                         if p.post_id not in all_posts:
@@ -456,6 +482,9 @@ class MultiSourceFetcher:
                         logger.info(f"  Arctic Shift r/{sub} '{kw}': {len(posts)} raw, {new} new")
                 except Exception as e:
                     arctic_errors += 1
+                    consecutive_failures += 1
+                    last_arctic_error = str(e)
+                    self.errors.append(f"Arctic Shift r/{sub} '{kw}': {e}")
                     logger.error(f"  Arctic Shift r/{sub} failed for '{kw}': {e}")
 
         arctic_count = len(all_posts)
@@ -469,6 +498,7 @@ class MultiSourceFetcher:
             progress_callback(f"Arctic Shift: {arctic_count} posts. Now trying Reddit...")
 
         # --- Source 2: Reddit search JSON (bonus, often blocked) ---------------
+        reddit_errors = 0
         for kw in keywords:
             try:
                 posts = self.reddit.search(query=f'"{kw}"', sort="new",
@@ -478,6 +508,7 @@ class MultiSourceFetcher:
                         all_posts[p.post_id] = p
                 logger.info(f"  Reddit '{kw}': {len(posts)} raw")
             except Exception as e:
+                reddit_errors += 1
                 logger.error(f"  Reddit search failed for '{kw}': {e}")
 
         # Targeted subreddit searches on Reddit
@@ -491,17 +522,22 @@ class MultiSourceFetcher:
                         if p.created_utc >= after_ts and p.post_id not in all_posts:
                             all_posts[p.post_id] = p
                 except Exception as e:
+                    reddit_errors += 1
                     logger.error(f"  r/{sub} search failed for '{kw}': {e}")
 
         reddit_added = len(all_posts) - arctic_count
-        diagnostics.append(f"Reddit: +{reddit_added} new posts")
-        logger.info(f"Reddit added: {reddit_added} new posts")
+        diag = f"Reddit: +{reddit_added} new posts"
+        if reddit_errors:
+            diag += f" ({reddit_errors} errors)"
+        diagnostics.append(diag)
+        logger.info(f"Reddit added: {reddit_added} new posts ({reddit_errors} errors)")
 
         # --- Source 3: Pullpush (fallback) ------------------------------------
         if progress_callback:
             progress_callback(f"Total so far: {len(all_posts)}. Trying Pullpush...")
 
         pre_pullpush = len(all_posts)
+        pullpush_errors = 0
         for kw in keywords:
             try:
                 posts = self.pullpush.search(query=kw, after_ts=after_ts, max_pages=5)
@@ -510,10 +546,14 @@ class MultiSourceFetcher:
                         all_posts[p.post_id] = p
                 logger.info(f"  Pullpush '{kw}': {len(posts)} raw")
             except Exception as e:
+                pullpush_errors += 1
                 logger.error(f"  Pullpush failed for '{kw}': {e}")
 
         pullpush_added = len(all_posts) - pre_pullpush
-        diagnostics.append(f"Pullpush: +{pullpush_added} new posts")
+        diag = f"Pullpush: +{pullpush_added} new posts"
+        if pullpush_errors:
+            diag += f" ({pullpush_errors} errors)"
+        diagnostics.append(diag)
 
         total = len(all_posts)
         logger.info(f"Grand total: {total} unique posts across all sources")

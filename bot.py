@@ -190,7 +190,15 @@ async def _run_research_pipeline(update: Update, brand_name: str, brand_config: 
         )
 
         if not posts:
-            await bot.send_message(chat_id, f"No posts found for {brand_name} in the last 3 months.")
+            error_msg = f"No posts found for {brand_name} in the last 3 months."
+            if fetcher.errors:
+                # Show first few errors so user knows what went wrong
+                error_msg += "\n\nSource errors encountered:"
+                for err in fetcher.errors[:5]:
+                    error_msg += f"\n- {err}"
+                if len(fetcher.errors) > 5:
+                    error_msg += f"\n... and {len(fetcher.errors) - 5} more"
+            await bot.send_message(chat_id, error_msg)
             return
 
         await bot.send_message(
