@@ -312,10 +312,13 @@ class BrandAnalyzer:
         product_terms = [t.lower() for t in brand_config.get("product_terms", [])]
         hint_subs = [s.lower() for s in brand_config.get("subreddit_hints", [])]
 
-        has_product_term = any(term in text for term in product_terms)
-        in_relevant_sub = post.subreddit.lower() in hint_subs
-        if not (has_product_term or in_relevant_sub):
-            return None
+        # If both product_terms and subreddit_hints are empty, trust the
+        # keyword-based fetch — the post was already matched by search keywords.
+        if product_terms or hint_subs:
+            has_product_term = any(term in text for term in product_terms)
+            in_relevant_sub = post.subreddit.lower() in hint_subs
+            if not (has_product_term or in_relevant_sub):
+                return None
 
         positive = ["love", "great", "amazing", "best", "awesome", "excellent",
                      "recommend", "good", "fantastic", "happy", "satisfied", "smooth"]

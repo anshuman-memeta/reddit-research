@@ -318,7 +318,7 @@ async def add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def add_brand_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["new_brand"] = {"name": update.message.text.strip()}
     await update.message.reply_text(
-        "*Category?*\n(beauty / finance / health\\_fitness / food / footwear / general)",
+        "*Category?*\n(beauty / finance / health\\_fitness / food / footwear / tech\\_gadgets / general)\n\n_Or type your own custom category_",
         parse_mode="Markdown",
     )
     return CATEGORY
