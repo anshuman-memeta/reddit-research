@@ -169,10 +169,25 @@ async def _run_research_pipeline(update: Update, brand_name: str, brand_config: 
 
     try:
         # -- Step 1: Fetch --------------------------------------------------
-        await bot.send_message(chat_id, "Fetching posts from Reddit, Arctic Shift & Pullpush...")
+        await bot.send_message(chat_id, "Fetching posts from Arctic Shift, Reddit & Pullpush...")
 
         fetcher = MultiSourceFetcher()
-        posts = await asyncio.to_thread(fetcher.fetch_all, brand_config, lookback_days=90)
+
+        # Send fetcher progress to Telegram so we can see per-source results
+        loop = asyncio.get_running_loop()
+
+        def fetch_progress(msg: str):
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    bot.send_message(chat_id, msg), loop
+                )
+            except Exception:
+                pass
+
+        posts = await asyncio.to_thread(
+            fetcher.fetch_all, brand_config, lookback_days=90,
+            progress_callback=fetch_progress,
+        )
 
         if not posts:
             await bot.send_message(chat_id, f"No posts found for {brand_name} in the last 3 months.")
