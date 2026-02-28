@@ -5,8 +5,10 @@ Reddit Research Bot - Telegram interface.
 Commands:
   /research <brand>   - Run a 3-month deep dive on a brand
   /research_add       - Onboard a new brand (interactive)
+  /research_edit <brand> - Edit a brand's config (interactive)
   /research_delete <brand> - Delete a brand
-  /research_list      - List all configured brands
+  /research_list      - List configured brands
+  /research_stop      - Cancel a running research
   /help               - Show help
 """
 
@@ -55,6 +57,12 @@ logger = logging.getLogger(__name__)
 BRAND_NAME, CATEGORY, KEYWORDS, PRODUCT_TERMS, COMPETITORS, SUBREDDIT_HINTS, DESCRIPTION = range(7)
 DELETE_CONFIRM = 0  # single state for delete conversation
 
+# ---- Conversation states for /research_edit -------------------------------
+EDIT_FIELD_SELECT, EDIT_FIELD_VALUE = range(2)
+
+# ---- Active research tasks (chat_id -> asyncio.Task) ----------------------
+_active_research: dict[int, asyncio.Task] = {}
+
 
 # ---- Helpers --------------------------------------------------------------
 
@@ -84,8 +92,10 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Commands:\n"
         "/research <brand> \u2014 Deep dive (3 months)\n"
         "/research\\_add \u2014 Add a new brand\n"
+        "/research\\_edit <brand> \u2014 Edit a brand's config\n"
         "/research\\_delete <brand> \u2014 Delete a brand\n"
         "/research\\_list \u2014 List configured brands\n"
+        "/research\\_stop \u2014 Cancel running research\n"
         "/help \u2014 Show this message",
         parse_mode="Markdown",
     )
@@ -152,13 +162,23 @@ async def cmd_research(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown",
     )
 
+    chat_id = update.effective_chat.id
+
+    # Cancel any already-running research for this chat
+    existing = _active_research.get(chat_id)
+    if existing and not existing.done():
+        existing.cancel()
+        await update.message.reply_text("Previous research cancelled. Starting new one...")
+
     # Run heavy pipeline in background so the bot stays responsive
     task = asyncio.create_task(_run_research_pipeline(update, matched_name, brand_config))
-    task.add_done_callback(_task_done_callback)
+    _active_research[chat_id] = task
+    task.add_done_callback(lambda t: _task_done_callback(t, chat_id))
 
 
-def _task_done_callback(task: asyncio.Task):
+def _task_done_callback(task: asyncio.Task, chat_id: int):
     """Log any unhandled exceptions from background research tasks."""
+    _active_research.pop(chat_id, None)
     if task.cancelled():
         logger.warning("Research task was cancelled")
     elif task.exception():
@@ -171,6 +191,12 @@ async def _run_research_pipeline(update: Update, brand_name: str, brand_config: 
     bot = update.get_bot()
 
     try:
+        # Helper to bail early if the task was cancelled
+        def _check_cancelled():
+            task = _active_research.get(chat_id)
+            if task and task.cancelled():
+                raise asyncio.CancelledError()
+
         # -- Step 1: Fetch --------------------------------------------------
         await bot.send_message(chat_id, "Fetching posts from Arctic Shift, Reddit & Pullpush...")
 
@@ -192,6 +218,8 @@ async def _run_research_pipeline(update: Update, brand_name: str, brand_config: 
             progress_callback=fetch_progress,
         )
 
+        _check_cancelled()
+
         if not posts:
             error_msg = f"No posts found for {brand_name} in the last 3 months."
             if fetcher.errors:
@@ -209,6 +237,8 @@ async def _run_research_pipeline(update: Update, brand_name: str, brand_config: 
             f"Found {len(posts)} posts. Filtering for relevance & analyzing sentiment...\n"
             f"(processing in batches of 10 via LLM)",
         )
+
+        _check_cancelled()
 
         # -- Step 2: Analyze ------------------------------------------------
         analyzer = BrandAnalyzer()
@@ -240,6 +270,8 @@ async def _run_research_pipeline(update: Update, brand_name: str, brand_config: 
 
         await bot.send_message(chat_id, f"{len(results)} relevant posts analyzed. Generating outputs...")
 
+        _check_cancelled()
+
         # -- Step 3: Charts -------------------------------------------------
         chart_paths = []
 
@@ -254,6 +286,8 @@ async def _run_research_pipeline(update: Update, brand_name: str, brand_config: 
         trend_chart = await asyncio.to_thread(generate_sentiment_trend, results, brand_name)
         if trend_chart:
             chart_paths.append(trend_chart)
+
+        _check_cancelled()
 
         # -- Step 4: Google Sheet -------------------------------------------
         sheet_url = None
@@ -323,9 +357,29 @@ async def _run_research_pipeline(update: Update, brand_name: str, brand_config: 
             except OSError:
                 pass
 
+    except asyncio.CancelledError:
+        logger.info(f"Research for {brand_name} was cancelled by user")
+        await bot.send_message(chat_id, f"Research on *{brand_name}* has been stopped.", parse_mode="Markdown")
     except Exception as e:
         logger.error(f"Research pipeline error: {e}", exc_info=True)
         await bot.send_message(chat_id, f"Research failed: {e}")
+
+
+# ---- /research_stop -------------------------------------------------------
+
+async def cmd_research_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update.effective_user.id):
+        return
+
+    chat_id = update.effective_chat.id
+    task = _active_research.get(chat_id)
+
+    if not task or task.done():
+        await update.message.reply_text("No research is currently running.")
+        return
+
+    task.cancel()
+    await update.message.reply_text("Stopping research... Please wait.")
 
 
 # ---- /research_add (conversation) -----------------------------------------
@@ -534,6 +588,161 @@ async def delete_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+# ---- /research_edit (conversation) ----------------------------------------
+
+EDIT_FIELDS = {
+    "1": "category",
+    "2": "keywords",
+    "3": "product_terms",
+    "4": "competitors",
+    "5": "subreddit_hints",
+    "6": "description",
+}
+
+
+async def edit_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update.effective_user.id):
+        return ConversationHandler.END
+
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: `/research_edit <brand_name>`", parse_mode="Markdown"
+        )
+        return ConversationHandler.END
+
+    brand_name = " ".join(context.args)
+    brands = load_brands().get("brands", {})
+
+    # Case-insensitive lookup
+    matched_name = None
+    matched_cfg = None
+    for name, cfg in brands.items():
+        if name.lower() == brand_name.lower():
+            matched_name = name
+            matched_cfg = cfg
+            break
+
+    if not matched_cfg:
+        available = ", ".join(brands.keys()) or "None"
+        await update.message.reply_text(
+            f"Brand '{brand_name}' not found.\n\nAvailable: {available}"
+        )
+        return ConversationHandler.END
+
+    context.user_data["edit_brand"] = matched_name
+
+    # Show current config and field selection menu
+    kws = ", ".join(matched_cfg.get("keywords", []))
+    pts = ", ".join(matched_cfg.get("product_terms", []))
+    comps = ", ".join(matched_cfg.get("competitors", [])) or "None"
+    subs = ", ".join(matched_cfg.get("subreddit_hints", [])) or "None"
+    desc = matched_cfg.get("description", "N/A")
+
+    await update.message.reply_text(
+        f"*Editing: {matched_name}*\n\n"
+        f"1. Category: {matched_cfg.get('category', 'general')}\n"
+        f"2. Keywords: {kws}\n"
+        f"3. Product terms: {pts}\n"
+        f"4. Competitors: {comps}\n"
+        f"5. Subreddits: {subs}\n"
+        f"6. Description: {desc}\n\n"
+        f"*Reply with the number (1-6) of the field to edit,*\n"
+        f"or /cancel to abort.",
+        parse_mode="Markdown",
+    )
+    return EDIT_FIELD_SELECT
+
+
+async def edit_field_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    choice = update.message.text.strip()
+
+    if choice not in EDIT_FIELDS:
+        await update.message.reply_text(
+            "Please reply with a number from 1 to 6, or /cancel."
+        )
+        return EDIT_FIELD_SELECT
+
+    field = EDIT_FIELDS[choice]
+    context.user_data["edit_field"] = field
+
+    brand_name = context.user_data["edit_brand"]
+    brands = load_brands().get("brands", {})
+    current_val = brands.get(brand_name, {}).get(field, "")
+
+    if isinstance(current_val, list):
+        current_display = ", ".join(current_val) if current_val else "None"
+    else:
+        current_display = current_val or "None"
+
+    if field == "category":
+        prompt = (
+            f"*Current {field}:* {current_display}\n\n"
+            f"Enter new category:\n"
+            f"(beauty / finance / health\\_fitness / food / footwear / tech\\_gadgets / general)\n"
+            f"_Or type your own custom category_"
+        )
+    elif field == "description":
+        prompt = f"*Current {field}:* {current_display}\n\nEnter new description:"
+    else:
+        prompt = (
+            f"*Current {field}:* {current_display}\n\n"
+            f"Enter new values (comma-separated):"
+        )
+
+    await update.message.reply_text(prompt, parse_mode="Markdown")
+    return EDIT_FIELD_VALUE
+
+
+async def edit_field_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    brand_name = context.user_data.pop("edit_brand", None)
+    field = context.user_data.pop("edit_field", None)
+
+    if not brand_name or not field:
+        await update.message.reply_text("Something went wrong. Please try /research\\_edit again.")
+        return ConversationHandler.END
+
+    text = update.message.text.strip()
+
+    try:
+        brands = load_brands()
+        brand_cfg = brands["brands"].get(brand_name)
+        if not brand_cfg:
+            await update.message.reply_text(f"Brand '{brand_name}' no longer exists.")
+            return ConversationHandler.END
+
+        # Parse the value: lists for most fields, plain string for category/description
+        if field in ("category", "description"):
+            new_val = text
+        else:
+            new_val = [v.strip() for v in text.split(",") if v.strip()]
+
+        brand_cfg[field] = new_val
+        save_brands(brands)
+        logger.info(f"Brand '{brand_name}' field '{field}' updated")
+
+        if isinstance(new_val, list):
+            display = ", ".join(new_val)
+        else:
+            display = new_val
+
+        await update.message.reply_text(
+            f"*{brand_name}* — *{field}* updated to:\n{display}",
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        logger.error(f"edit_field_value failed: {e}", exc_info=True)
+        await update.message.reply_text(f"Error saving edit: {e}")
+
+    return ConversationHandler.END
+
+
+async def edit_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop("edit_brand", None)
+    context.user_data.pop("edit_field", None)
+    await update.message.reply_text("Edit cancelled.")
+    return ConversationHandler.END
+
+
 # ---- Bot setup & main -----------------------------------------------------
 
 def main():
@@ -548,6 +757,7 @@ def main():
     app.add_handler(CommandHandler("help", cmd_start))
     app.add_handler(CommandHandler("research_list", cmd_research_list))
     app.add_handler(CommandHandler("research", cmd_research))
+    app.add_handler(CommandHandler("research_stop", cmd_research_stop))
 
     # Conversation: /research_add
     conv = ConversationHandler(
@@ -580,13 +790,29 @@ def main():
     )
     app.add_handler(delete_conv)
 
+    # Conversation: /research_edit
+    edit_conv = ConversationHandler(
+        entry_points=[CommandHandler("research_edit", edit_start)],
+        states={
+            EDIT_FIELD_SELECT: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_field_select)],
+            EDIT_FIELD_VALUE:  [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_field_value)],
+        },
+        fallbacks=[
+            CommandHandler("cancel", edit_cancel),
+            CommandHandler("research_edit", edit_start),  # restart mid-conversation
+        ],
+    )
+    app.add_handler(edit_conv)
+
     # Register commands in Telegram menu
     async def post_init(application):
         await application.bot.set_my_commands([
             BotCommand("research", "Deep dive on a brand (3 months)"),
             BotCommand("research_add", "Add a new brand"),
+            BotCommand("research_edit", "Edit a brand's config"),
             BotCommand("research_delete", "Delete a brand"),
             BotCommand("research_list", "List configured brands"),
+            BotCommand("research_stop", "Cancel running research"),
             BotCommand("help", "Show help"),
         ])
 
