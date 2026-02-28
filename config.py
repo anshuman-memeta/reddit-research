@@ -70,6 +70,10 @@ SENTIMENT_COLORS = {
 }
 
 CHART_OUTPUT_DIR = "/tmp/research_charts"
+
+# Comment fetching (detailed mode)
+COMMENT_SCORE_THRESHOLD = 20    # only fetch comments for posts with this many upvotes
+MAX_COMMENTS_PER_POST = 3       # top comments to fetch per post
 GOOGLE_DRIVE_FOLDER_ID = os.getenv("GOOGLE_DRIVE_FOLDER_ID", "")
 
 # OAuth2 user credentials

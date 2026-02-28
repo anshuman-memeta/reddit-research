@@ -21,7 +21,7 @@ from typing import Callable, Optional
 
 import requests
 
-from config import REDDIT_RATE_LIMIT_DELAY, REDDIT_USER_AGENT
+from config import REDDIT_RATE_LIMIT_DELAY, REDDIT_USER_AGENT, MAX_COMMENTS_PER_POST
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +62,18 @@ class RedditPost:
 
     def __hash__(self):
         return hash(self.post_id)
+
+
+@dataclass
+class RedditComment:
+    """A single Reddit comment."""
+
+    comment_id: str
+    post_id: str
+    body: str
+    author: str
+    score: int
+    created_utc: float
 
 
 # ---------------------------------------------------------------------------
@@ -609,6 +621,104 @@ class PullpushFetcher:
             time.sleep(self.rate_limit)
 
         return posts
+
+
+# ---------------------------------------------------------------------------
+# Comment fetcher (used in detailed mode)
+# ---------------------------------------------------------------------------
+
+class CommentFetcher:
+    """Fetches top comments for specific Reddit posts using the JSON API."""
+
+    ENDPOINTS = [
+        "https://old.reddit.com",
+        "https://www.reddit.com",
+    ]
+
+    def __init__(self, rate_limit: float = REDDIT_RATE_LIMIT_DELAY):
+        self.session = requests.Session()
+        self.session.headers.update({
+            "User-Agent": REDDIT_USER_AGENT,
+            "Accept": "application/json",
+        })
+        self.rate_limit = rate_limit
+
+    def fetch_comments(self, subreddit: str, post_id: str,
+                       limit: int = MAX_COMMENTS_PER_POST) -> list[RedditComment]:
+        """Fetch top-level comments for a single post, sorted by score."""
+        path = f"/r/{subreddit}/comments/{post_id}.json"
+        params = {"sort": "top", "limit": limit, "depth": 1}
+
+        for base in self.ENDPOINTS:
+            url = f"{base}{path}"
+            try:
+                resp = self.session.get(url, params=params, timeout=20)
+                if resp.status_code in (403, 429):
+                    continue  # try next endpoint
+                resp.raise_for_status()
+                data = resp.json()
+                return self._parse_comments(data, post_id)
+            except Exception as e:
+                logger.warning(f"Comment fetch failed for {post_id} via {base}: {e}")
+        return []
+
+    @staticmethod
+    def _parse_comments(data, post_id: str) -> list[RedditComment]:
+        """Parse Reddit JSON response into RedditComment objects."""
+        comments: list[RedditComment] = []
+        if not isinstance(data, list) or len(data) < 2:
+            return comments
+
+        children = data[1].get("data", {}).get("children", [])
+        for child in children:
+            if child.get("kind") != "t1":
+                continue
+            d = child.get("data", {})
+            body = d.get("body", "")
+            if not body or body in ("[deleted]", "[removed]"):
+                continue
+            comments.append(RedditComment(
+                comment_id=d.get("id", ""),
+                post_id=post_id,
+                body=body[:500],
+                author=d.get("author", "[deleted]"),
+                score=d.get("score", 0),
+                created_utc=d.get("created_utc", 0),
+            ))
+        return comments
+
+    def fetch_comments_batch(
+        self,
+        posts: list[dict],
+        limit: int = MAX_COMMENTS_PER_POST,
+        progress_callback: Optional[Callable] = None,
+    ) -> dict[str, list[RedditComment]]:
+        """Fetch comments for multiple posts with rate limiting.
+
+        Args:
+            posts: list of result dicts (must have 'post_id' and 'subreddit')
+            limit: max comments per post
+            progress_callback: called with (done, total) after every 10 posts
+
+        Returns:
+            {post_id: [RedditComment, ...]}
+        """
+        all_comments: dict[str, list[RedditComment]] = {}
+        total = len(posts)
+
+        for i, post in enumerate(posts):
+            pid = post["post_id"]
+            sub = post["subreddit"]
+            comments = self.fetch_comments(sub, pid, limit=limit)
+            all_comments[pid] = comments
+
+            if progress_callback and (i + 1) % 10 == 0:
+                progress_callback(i + 1, total)
+
+            if i < total - 1:
+                time.sleep(self.rate_limit)
+
+        return all_comments
 
 
 # ---------------------------------------------------------------------------
