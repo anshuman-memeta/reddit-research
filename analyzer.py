@@ -62,6 +62,115 @@ Respond with ONLY a JSON array. One object per post, in the same order:
 
 Return ONLY the JSON array, no other text."""
 
+# Detailed mode prompts — extract richer intelligence per post
+DETAILED_COMBINED_PROMPT = """You are analyzing a Reddit post to determine if it's about a specific brand, and if so, extract detailed brand intelligence.
+
+Brand: {brand_name}
+Description: {brand_description}
+Category: {category}
+
+Reddit post title: {title}
+Reddit post body: {body}
+Subreddit: r/{subreddit}
+Upvotes: {score}
+
+The brand name may also be a common word (e.g. "Sahi" means "correct" in Hindi). Only mark as relevant if the post is actually discussing the brand/product.
+
+Known competitors: {competitors}
+
+Respond with ONLY a JSON object:
+- If the post is NOT about the brand: {{"relevant": false}}
+- If the post IS about the brand:
+{{
+  "relevant": true,
+  "sentiment": "positive|negative|neutral",
+  "theme": "short theme",
+  "summary": "One-line summary.",
+  "competitor_mentions": ["Competitor"],
+  "post_type": "review|question|complaint|recommendation|comparison|discussion",
+  "purchase_intent": "considering|purchased|churned|recommending|none",
+  "recommendation_strength": "strong_recommend|recommend|neutral|caution|strong_negative",
+  "pain_points": ["specific complaint or issue"],
+  "feature_requests": ["specific feature wish or suggestion"],
+  "head_to_head": {{"competitor": "CompetitorName", "winner": "brand|competitor|tie"}} or null,
+  "competitor_sentiment": {{"CompetitorName": "positive|negative|neutral"}} or null
+}}
+
+Rules:
+- pain_points: List specific complaints/issues. Empty list if none.
+- feature_requests: List specific wishes/suggestions. Empty list if none.
+- head_to_head: Only if post directly compares brand vs a competitor. null otherwise.
+- competitor_sentiment: Sentiment toward each mentioned competitor. null if no competitors mentioned.
+- purchase_intent: "none" if no purchase signal detected."""
+
+DETAILED_BATCH_PROMPT = """You are analyzing multiple Reddit posts to determine if each one is about a specific brand, and if so, extract detailed brand intelligence.
+
+Brand: {brand_name}
+Description: {brand_description}
+Category: {category}
+Known competitors: {competitors}
+
+The brand name may also be a common word (e.g. "Sahi" means "correct" in Hindi). Only mark as relevant if the post is ACTUALLY discussing the brand/product.
+
+Below are the posts. Each has an "id" you must include in your response.
+
+{posts_block}
+
+Respond with ONLY a JSON array. One object per post, in the same order:
+
+If NOT about the brand:
+{{"id": "<post_id>", "relevant": false}}
+
+If about the brand:
+{{
+  "id": "<post_id>",
+  "relevant": true,
+  "sentiment": "positive|negative|neutral",
+  "theme": "short theme",
+  "summary": "One-line summary.",
+  "competitor_mentions": ["Competitor"],
+  "post_type": "review|question|complaint|recommendation|comparison|discussion",
+  "purchase_intent": "considering|purchased|churned|recommending|none",
+  "recommendation_strength": "strong_recommend|recommend|neutral|caution|strong_negative",
+  "pain_points": ["specific complaint or issue"],
+  "feature_requests": ["specific feature wish or suggestion"],
+  "head_to_head": {{"competitor": "CompetitorName", "winner": "brand|competitor|tie"}} or null,
+  "competitor_sentiment": {{"CompetitorName": "positive|negative|neutral"}} or null
+}}
+
+Rules:
+- pain_points: List specific complaints/issues. Empty list if none.
+- feature_requests: List specific wishes/suggestions. Empty list if none.
+- head_to_head: Only if post directly compares brand vs a competitor. null otherwise.
+- competitor_sentiment: Sentiment toward each mentioned competitor. null if no competitors mentioned.
+- purchase_intent: "none" if no purchase signal detected.
+
+Return ONLY the JSON array, no other text."""
+
+# Prompt for analyzing comments on relevant posts (detailed mode)
+COMMENT_ANALYSIS_PROMPT = """You are analyzing Reddit comments on posts about a specific brand.
+
+Brand: {brand_name}
+Category: {category}
+Known competitors: {competitors}
+
+For each post below, you have the post title and its top comments. Analyze the comments to extract:
+1. Overall comment sentiment toward the brand
+2. Any pain points or complaints mentioned in comments
+3. Any feature requests or suggestions in comments
+
+{comments_block}
+
+Respond with ONLY a JSON array. One object per post:
+{{
+  "post_id": "<post_id>",
+  "top_comment_sentiment": "positive|negative|neutral|mixed",
+  "comment_pain_points": ["specific issue from comments"],
+  "comment_feature_requests": ["feature request from comments"]
+}}
+
+Return ONLY the JSON array, no other text."""
+
 BATCH_SIZE = 10  # posts per LLM call
 
 _VALID_SENTIMENTS = {"positive", "negative", "neutral"}
@@ -221,13 +330,18 @@ class BrandAnalyzer:
         self,
         posts: list[RedditPost],
         brand_config: dict,
+        detailed: bool = False,
     ) -> dict[str, Optional[dict]]:
         """
         Analyse up to BATCH_SIZE posts in a single LLM call.
         Returns {post_id: analysis_dict_or_None}.
+
+        When detailed=True, uses the extended prompt that extracts
+        post_type, purchase_intent, recommendation_strength, etc.
         """
         competitors = brand_config.get("competitors", [])
-        prompt = BATCH_PROMPT.format(
+        template = DETAILED_BATCH_PROMPT if detailed else BATCH_PROMPT
+        prompt = template.format(
             brand_name=brand_config["name"],
             brand_description=brand_config.get("description", ""),
             category=brand_config.get("category", "general"),
@@ -235,8 +349,8 @@ class BrandAnalyzer:
             posts_block=self._build_posts_block(posts),
         )
 
-        # Allocate ~120 tokens per post for the response
-        max_tokens = min(len(posts) * 150, 4096)
+        tokens_per_post = 300 if detailed else 150
+        max_tokens = min(len(posts) * tokens_per_post, 4096)
 
         raw = self._call_llm(prompt, max_retries=4, max_tokens=max_tokens)
         if raw is None:
@@ -260,23 +374,40 @@ class BrandAnalyzer:
             if not item.get("relevant", False):
                 results[pid] = None
             else:
-                results[pid] = {
+                result = {
                     "sentiment": _normalize_sentiment(item.get("sentiment", "neutral")),
                     "theme": item.get("theme", "general discussion"),
                     "summary": item.get("summary", ""),
                     "competitor_mentions": item.get("competitor_mentions", []),
                 }
+                if detailed:
+                    result.update({
+                        "post_type": item.get("post_type", "discussion"),
+                        "purchase_intent": item.get("purchase_intent", "none"),
+                        "recommendation_strength": item.get("recommendation_strength", "neutral"),
+                        "pain_points": item.get("pain_points", []),
+                        "feature_requests": item.get("feature_requests", []),
+                        "head_to_head": item.get("head_to_head"),
+                        "competitor_sentiment": item.get("competitor_sentiment"),
+                    })
+                results[pid] = result
         return results
 
     # ----- Single-post analysis (fallback) --------------------------------
 
-    def analyze_post(self, post: RedditPost, brand_config: dict) -> Optional[dict]:
+    def analyze_post(
+        self,
+        post: RedditPost,
+        brand_config: dict,
+        detailed: bool = False,
+    ) -> Optional[dict]:
         """
         Combined relevance check + sentiment in ONE LLM call (single post).
         Falls back to keyword heuristics if LLM unavailable.
         """
         competitors = brand_config.get("competitors", [])
-        prompt = COMBINED_PROMPT.format(
+        template = DETAILED_COMBINED_PROMPT if detailed else COMBINED_PROMPT
+        prompt = template.format(
             brand_name=brand_config["name"],
             brand_description=brand_config.get("description", ""),
             category=brand_config.get("category", "general"),
@@ -287,26 +418,43 @@ class BrandAnalyzer:
             competitors=", ".join(competitors) if competitors else "none known",
         )
 
-        raw = self._call_llm(prompt, max_tokens=256)
+        max_tokens = 512 if detailed else 256
+        raw = self._call_llm(prompt, max_tokens=max_tokens)
         if raw is not None:
             try:
                 result = self._parse_json(raw)
                 if not result.get("relevant", False):
                     return None
-                return {
+                analysis = {
                     "sentiment": _normalize_sentiment(result.get("sentiment", "neutral")),
                     "theme": result.get("theme", "general discussion"),
                     "summary": result.get("summary", ""),
                     "competitor_mentions": result.get("competitor_mentions", []),
                 }
+                if detailed:
+                    analysis.update({
+                        "post_type": result.get("post_type", "discussion"),
+                        "purchase_intent": result.get("purchase_intent", "none"),
+                        "recommendation_strength": result.get("recommendation_strength", "neutral"),
+                        "pain_points": result.get("pain_points", []),
+                        "feature_requests": result.get("feature_requests", []),
+                        "head_to_head": result.get("head_to_head"),
+                        "competitor_sentiment": result.get("competitor_sentiment"),
+                    })
+                return analysis
             except (json.JSONDecodeError, ValueError):
                 logger.error("Failed to parse single-post LLM response")
 
-        return self._keyword_fallback(post, brand_config)
+        return self._keyword_fallback(post, brand_config, detailed=detailed)
 
     # ----- Keyword fallback -----------------------------------------------
 
-    def _keyword_fallback(self, post: RedditPost, brand_config: dict) -> Optional[dict]:
+    def _keyword_fallback(
+        self,
+        post: RedditPost,
+        brand_config: dict,
+        detailed: bool = False,
+    ) -> Optional[dict]:
         """Keyword-based relevance + sentiment when LLM is unavailable."""
         text = f"{post.title} {post.selftext}".lower()
         product_terms = [t.lower() for t in brand_config.get("product_terms", [])]
@@ -338,12 +486,23 @@ class BrandAnalyzer:
 
         competitors_found = [c for c in brand_config.get("competitors", []) if c.lower() in text]
 
-        return {
+        result = {
             "sentiment": sentiment,
             "theme": "general discussion",
             "summary": post.title[:100],
             "competitor_mentions": competitors_found,
         }
+        if detailed:
+            result.update({
+                "post_type": "discussion",
+                "purchase_intent": "none",
+                "recommendation_strength": "neutral",
+                "pain_points": [],
+                "feature_requests": [],
+                "head_to_head": None,
+                "competitor_sentiment": None,
+            })
+        return result
 
     # ----- Full pipeline --------------------------------------------------
 
@@ -352,18 +511,23 @@ class BrandAnalyzer:
         posts: list[RedditPost],
         brand_config: dict,
         progress_callback: Optional[Callable[[int, int, int], None]] = None,
+        detailed: bool = False,
     ) -> list[dict]:
         """
         Batch analysis pipeline. Sends up to BATCH_SIZE posts per LLM call.
         Falls back to single-post calls for any posts missing from the
         batch response, then keyword heuristics as last resort.
 
+        When detailed=True, the expanded prompt extracts additional fields
+        (post_type, purchase_intent, pain_points, etc.).
+
         When Groq rate-limits us, we stop hammering the API and use keyword
         fallback for the rest.  Each new batch resets the flag to try again.
         """
         results: list[dict] = []
         total = len(posts)
-        logger.info(f"Starting batch analysis of {total} posts (batch size={BATCH_SIZE})...")
+        mode = "detailed" if detailed else "quick"
+        logger.info(f"Starting {mode} batch analysis of {total} posts (batch size={BATCH_SIZE})...")
 
         processed = 0
         fallback_count = 0
@@ -382,7 +546,7 @@ class BrandAnalyzer:
             )
 
             # --- Try batch LLM call ---
-            batch_results = self.analyze_batch(batch, brand_config)
+            batch_results = self.analyze_batch(batch, brand_config, detailed=detailed)
             batch_was_rate_limited = self._all_rate_limited
 
             for post in batch:
@@ -393,7 +557,7 @@ class BrandAnalyzer:
                 elif batch_was_rate_limited:
                     # Batch failed due to rate limits — don't hammer with
                     # individual calls, go straight to keyword fallback
-                    analysis = self._keyword_fallback(post, brand_config)
+                    analysis = self._keyword_fallback(post, brand_config, detailed=detailed)
                     fallback_count += 1
                 else:
                     # Batch succeeded but this post was missing from response
@@ -401,7 +565,7 @@ class BrandAnalyzer:
                         f"  Post {post.post_id} missing from batch, "
                         f"trying single call..."
                     )
-                    analysis = self.analyze_post(post, brand_config)
+                    analysis = self.analyze_post(post, brand_config, detailed=detailed)
                     time.sleep(2)  # small delay for single fallback calls
 
                 if analysis is None:
@@ -412,7 +576,7 @@ class BrandAnalyzer:
                         f"sentiment={analysis['sentiment']}, "
                         f"theme={analysis['theme'][:40]}"
                     )
-                    results.append({
+                    entry = {
                         "post_id": post.post_id,
                         "title": post.title,
                         "selftext": (post.selftext or "")[:500],
@@ -428,7 +592,18 @@ class BrandAnalyzer:
                         "theme": analysis["theme"],
                         "summary": analysis["summary"],
                         "competitor_mentions": ", ".join(analysis["competitor_mentions"]),
-                    })
+                    }
+                    if detailed:
+                        entry.update({
+                            "post_type": analysis.get("post_type", "discussion"),
+                            "purchase_intent": analysis.get("purchase_intent", "none"),
+                            "recommendation_strength": analysis.get("recommendation_strength", "neutral"),
+                            "pain_points": analysis.get("pain_points", []),
+                            "feature_requests": analysis.get("feature_requests", []),
+                            "head_to_head": analysis.get("head_to_head"),
+                            "competitor_sentiment": analysis.get("competitor_sentiment"),
+                        })
+                    results.append(entry)
 
             # Progress update after each batch
             if progress_callback:
@@ -445,3 +620,116 @@ class BrandAnalyzer:
             logger.info(f"  ({fallback_count} posts used keyword fallback due to rate limits)")
         logger.info(f"Analysis complete: {len(results)} relevant out of {total} posts")
         return results
+
+    # ----- Comment analysis (detailed mode) --------------------------------
+
+    def analyze_comments(
+        self,
+        comments_by_post: dict,
+        brand_config: dict,
+        batch_size: int = 5,
+    ) -> dict[str, dict]:
+        """
+        Analyze comments in batches. Returns {post_id: comment_analysis}.
+        comments_by_post: {post_id: [RedditComment, ...]}
+        """
+        results = {}
+        post_ids = [pid for pid, comms in comments_by_post.items() if comms]
+        competitors = brand_config.get("competitors", [])
+
+        for i in range(0, len(post_ids), batch_size):
+            batch_pids = post_ids[i : i + batch_size]
+
+            parts = []
+            for pid in batch_pids:
+                comments = comments_by_post[pid]
+                comment_texts = "\n".join(
+                    f"  - [score:{c.score}] {c.body[:300]}"
+                    for c in comments[:3]
+                )
+                parts.append(f"---\npost_id: {pid}\ncomments:\n{comment_texts}")
+
+            prompt = COMMENT_ANALYSIS_PROMPT.format(
+                brand_name=brand_config["name"],
+                category=brand_config.get("category", "general"),
+                competitors=", ".join(competitors) if competitors else "none known",
+                comments_block="\n".join(parts),
+            )
+
+            raw = self._call_llm(
+                prompt,
+                max_retries=3,
+                max_tokens=min(len(batch_pids) * 200, 2048),
+            )
+            if raw is None:
+                continue
+
+            try:
+                parsed = self._parse_json(raw)
+                if not isinstance(parsed, list):
+                    continue
+                for item in parsed:
+                    pid = item.get("post_id")
+                    if pid:
+                        results[pid] = {
+                            "top_comment_sentiment": _normalize_comment_sentiment(
+                                item.get("top_comment_sentiment", "neutral")
+                            ),
+                            "comment_pain_points": item.get("comment_pain_points", []),
+                            "comment_feature_requests": item.get("comment_feature_requests", []),
+                        }
+            except (json.JSONDecodeError, ValueError):
+                logger.error("Failed to parse comment analysis response")
+
+            time.sleep(5)  # cooldown between comment analysis batches
+
+        return results
+
+
+def _normalize_comment_sentiment(value: str) -> str:
+    """Clamp comment sentiment to valid values."""
+    v = value.strip().lower()
+    if v in ("positive", "negative", "neutral", "mixed"):
+        return v
+    return "neutral"
+
+
+def compute_share_of_voice(
+    posts: list,
+    brand_name: str,
+    keywords: list[str],
+    competitors: list[str],
+) -> dict[str, dict]:
+    """
+    Count brand vs. competitor mentions across ALL fetched posts.
+
+    Args:
+        posts: list of RedditPost objects (all fetched, pre-LLM-filter)
+        brand_name: the brand being researched
+        keywords: brand search keywords
+        competitors: list of competitor names
+
+    Returns:
+        {name: {"mentions": N, "share_pct": X.X}}
+    """
+    counts: dict[str, int] = {brand_name: 0}
+    for comp in competitors:
+        counts[comp] = 0
+
+    for post in posts:
+        text = f"{post.title} {post.selftext}".lower()
+        # Count brand mentions (any keyword match)
+        for kw in keywords:
+            if kw.lower() in text:
+                counts[brand_name] += 1
+                break  # count each post once per entity
+        # Count competitor mentions
+        for comp in competitors:
+            if comp.lower() in text:
+                counts[comp] += 1
+
+    total = sum(counts.values()) or 1
+    return {
+        name: {"mentions": count, "share_pct": round(count / total * 100, 1)}
+        for name, count in counts.items()
+    }
