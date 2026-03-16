@@ -17,6 +17,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import sys
 
 from collections import Counter
@@ -208,11 +209,28 @@ def _task_done_callback(task: asyncio.Task, chat_id: int):
         logger.error(f"Research task crashed: {task.exception()}", exc_info=task.exception())
 
 
+def _escape_md(text: str) -> str:
+    """Escape special characters for Telegram Markdown (legacy mode)."""
+    # In legacy Markdown mode, these characters have special meaning: _ * ` [
+    return re.sub(r'([_*`\[])', r'\\\1', str(text))
+
+
 async def _send_long_message(bot, chat_id, text, parse_mode="Markdown"):
     """Send a message, splitting if it exceeds Telegram's 4096 char limit."""
     MAX_LEN = 4000
+
+    async def _send_chunk(chunk):
+        try:
+            await bot.send_message(chat_id, chunk, parse_mode=parse_mode, disable_web_page_preview=True)
+        except Exception as e:
+            if "parse entities" in str(e).lower() or "can't find end" in str(e).lower():
+                logger.warning(f"Markdown parse failed, retrying without formatting: {e}")
+                await bot.send_message(chat_id, chunk, disable_web_page_preview=True)
+            else:
+                raise
+
     if len(text) <= MAX_LEN:
-        await bot.send_message(chat_id, text, parse_mode=parse_mode, disable_web_page_preview=True)
+        await _send_chunk(text)
         return
 
     parts = text.split("\n\n")
@@ -220,12 +238,12 @@ async def _send_long_message(bot, chat_id, text, parse_mode="Markdown"):
     for part in parts:
         if len(current) + len(part) + 2 > MAX_LEN:
             if current:
-                await bot.send_message(chat_id, current, parse_mode=parse_mode, disable_web_page_preview=True)
+                await _send_chunk(current)
             current = part
         else:
             current = current + "\n\n" + part if current else part
     if current:
-        await bot.send_message(chat_id, current, parse_mode=parse_mode, disable_web_page_preview=True)
+        await _send_chunk(current)
 
 
 async def _run_research_pipeline(
@@ -446,7 +464,7 @@ async def _run_research_pipeline(
         neu = sentiments.get("neutral", 0)
 
         summary = (
-            f"*Research Complete: {brand_name}*\n"
+            f"*Research Complete: {_escape_md(brand_name)}*\n"
             f"{'=' * 30}\n\n"
             f"*Total relevant posts:* {total} (last 3 months)\n\n"
             f"*Sentiment breakdown:*\n"
@@ -456,11 +474,11 @@ async def _run_research_pipeline(
             f"*Top subreddits:*\n"
         )
         for sub, count in subreddits.most_common(5):
-            summary += f"  r/{sub}: {count} posts\n"
+            summary += f"  r/{_escape_md(sub)}: {count} posts\n"
 
         summary += "\n*Top themes:*\n"
         for theme, count in themes.most_common(5):
-            summary += f"  {theme}: {count}\n"
+            summary += f"  {_escape_md(theme)}: {count}\n"
 
         if detailed:
             # Share of Voice
@@ -468,7 +486,7 @@ async def _run_research_pipeline(
                 summary += "\n*Share of Voice:*\n"
                 for name, data in sorted(sov_data.items(), key=lambda x: x[1]["share_pct"], reverse=True):
                     marker = " (brand)" if name == brand_name else ""
-                    summary += f"  {name}{marker}: {data['share_pct']}% ({data['mentions']} mentions)\n"
+                    summary += f"  {_escape_md(name)}{marker}: {data['share_pct']}% ({data['mentions']} mentions)\n"
 
             # Post Types
             post_types = Counter(r.get("post_type", "discussion") for r in results)
@@ -501,7 +519,7 @@ async def _run_research_pipeline(
             if all_pain:
                 summary += "\n*Top Pain Points:*\n"
                 for pain, count in Counter(all_pain).most_common(5):
-                    summary += f"  \u2022 {pain} ({count}x)\n"
+                    summary += f"  \u2022 {_escape_md(pain)} ({count}x)\n"
 
             # Top Feature Requests
             all_feat = []
@@ -512,7 +530,7 @@ async def _run_research_pipeline(
             if all_feat:
                 summary += "\n*Feature Requests:*\n"
                 for feat, count in Counter(all_feat).most_common(5):
-                    summary += f"  \u2022 {feat} ({count}x)\n"
+                    summary += f"  \u2022 {_escape_md(feat)} ({count}x)\n"
 
             # Head-to-Head Comparisons
             h2h_results = []
@@ -528,7 +546,7 @@ async def _run_research_pipeline(
                     winner = h.get("winner", "tie")
                     wins[(comp, winner)] += 1
                 for (comp, winner), count in wins.most_common(5):
-                    summary += f"  vs {comp}: {winner} ({count}x)\n"
+                    summary += f"  vs {_escape_md(comp)}: {_escape_md(winner)} ({count}x)\n"
 
         if sheet_url:
             summary += f"\n*Google Sheet:* [Open Research Appendix]({sheet_url})"
